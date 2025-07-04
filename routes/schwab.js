@@ -2,43 +2,54 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const qs = require('qs');
-const { getBasicAuthHeader, saveToken, getToken } = require('./auth'); // Adjust the path as necessary
+const { getBasicAuthHeader, saveToken, getToken } = require('../utils/schwab'); // Adjust path if needed
 
-// Enhanced callback route with full debugging
+const {
+  SCHWAB_CLIENT_ID,
+  SCHWAB_CLIENT_SECRET,
+  SCHWAB_REDIRECT_URI
+} = process.env;
+
+// 🔐 Step 1: Start Schwab OAuth Login
+router.get('/connect', (req, res) => {
+  if (!SCHWAB_CLIENT_ID || !SCHWAB_CLIENT_SECRET || !SCHWAB_REDIRECT_URI) {
+    return res.status(500).send('❌ Missing Schwab environment configuration.');
+  }
+
+  const scopes = 'read_content read_product read_client read_account read_trade';
+  const authUrl = new URL('https://api.schwabapi.com/v1/oauth/authorize');
+  
+  authUrl.searchParams.append('client_id', SCHWAB_CLIENT_ID);
+  authUrl.searchParams.append('response_type', 'code');
+  authUrl.searchParams.append('redirect_uri', SCHWAB_REDIRECT_URI);
+  authUrl.searchParams.append('scope', scopes);
+
+  console.log('🚀 Redirecting to Schwab OAuth:', authUrl.toString());
+  res.redirect(authUrl.toString());
+});
+
+// ✅ Step 2: OAuth Callback - Exchange Code for Token
 router.get('/callback', async (req, res) => {
   const code = req.query.code;
   const error = req.query.error;
-  
-  console.log('📨 CALLBACK RECEIVED:');
-  console.log('  - Code present:', !!code);
-  console.log('  - Error:', error);
-  console.log('  - Full query:', req.query);
-  
+
+  console.log('📨 Callback Received:', { code: code ? 'present' : 'missing', error });
+
   if (error) {
-    console.error('❌ OAuth error:', error);
     return res.status(400).send(`❌ OAuth Error: ${error}`);
   }
-  
+
   if (!code) {
-    console.error('❌ No authorization code received');
-    return res.status(400).send('❌ No authorization code received');
+    return res.status(400).send('❌ No authorization code received.');
   }
 
   try {
-    console.log('🔄 STARTING TOKEN EXCHANGE...');
-    
     const tokenRequest = {
       grant_type: 'authorization_code',
       code,
       redirect_uri: SCHWAB_REDIRECT_URI
     };
-    
-    console.log('📤 TOKEN REQUEST:');
-    console.log('  - Grant type:', tokenRequest.grant_type);
-    console.log('  - Redirect URI:', tokenRequest.redirect_uri);
-    console.log('  - Code length:', code.length);
-    console.log('  - Auth header present:', !!getBasicAuthHeader());
-    
+
     const response = await axios.post(
       'https://api.schwabapi.com/v1/oauth/token',
       qs.stringify(tokenRequest),
@@ -51,105 +62,80 @@ router.get('/callback', async (req, res) => {
       }
     );
 
-    console.log('✅ TOKEN RESPONSE RECEIVED:');
-    console.log('  - Status:', response.status);
-    console.log('  - Has access_token:', !!response.data.access_token);
-    console.log('  - Has refresh_token:', !!response.data.refresh_token);
-    console.log('  - Expires in:', response.data.expires_in);
-    console.log('  - Token type:', response.data.token_type);
-    console.log('  - Scope:', response.data.scope);
-    console.log('  - Full response keys:', Object.keys(response.data));
-
-    // Check if we actually got a token
     if (!response.data.access_token) {
-      console.error('❌ NO ACCESS TOKEN IN RESPONSE');
-      return res.status(500).send('❌ No access token received from Schwab');
+      return res.status(500).send('❌ No access token received from Schwab.');
     }
 
-    console.log('💾 SAVING TOKEN TO DATABASE...');
     await saveToken(response.data);
-    console.log('✅ TOKEN SAVED SUCCESSFULLY');
-
-    // Verify token was saved
     const savedToken = await getToken();
-    console.log('🔍 VERIFICATION:');
-    console.log('  - Token saved:', !!savedToken);
-    console.log('  - Access token present:', !!savedToken?.access_token);
-    console.log('  - Refresh token present:', !!savedToken?.refresh_token);
-    
+
     res.json({
       success: true,
-      message: 'Schwab token saved successfully!',
+      message: '✅ Schwab token saved successfully!',
       token_info: {
         has_access_token: !!savedToken?.access_token,
         has_refresh_token: !!savedToken?.refresh_token,
         expires_in: response.data.expires_in,
-        token_type: response.data.token_type
+        scope: response.data.scope
       }
     });
-    
   } catch (err) {
-    console.error('❌ TOKEN EXCHANGE FAILED:');
-    console.error('  - Status:', err.response?.status);
-    console.error('  - Status text:', err.response?.statusText);
-    console.error('  - Response data:', JSON.stringify(err.response?.data, null, 2));
-    console.error('  - Request config:', {
-      url: err.config?.url,
-      method: err.config?.method,
-      headers: err.config?.headers
+    const status = err.response?.status;
+    const data = err.response?.data;
+
+    console.error('❌ Token exchange failed:', {
+      status,
+      data,
+      message: err.message
     });
-    console.error('  - Error message:', err.message);
-    console.error('  - Full error:', err);
-    
-    // More specific error messages
-    if (err.response?.status === 401) {
-      res.status(500).json({
+
+    if (status === 401) {
+      return res.status(401).json({
         error: 'Unauthorized',
-        message: 'Check your client credentials and app status',
-        details: err.response?.data
-      });
-    } else if (err.response?.status === 400) {
-      res.status(500).json({
-        error: 'Bad Request',
-        message: 'Invalid request parameters',
-        details: err.response?.data
-      });
-    } else {
-      res.status(500).json({
-        error: 'Token Exchange Failed',
-        message: err.message,
-        details: err.response?.data
+        message: 'Invalid client credentials or inactive app'
       });
     }
+
+    if (status === 400) {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: data?.error_description || 'Invalid request',
+        details: data
+      });
+    }
+
+    res.status(500).json({
+      error: 'Token Exchange Failed',
+      message: err.message,
+      details: data
+    });
   }
 });
 
-// Add token verification endpoint
+// ✅ Token Verification Endpoint
 router.get('/verify-token', async (req, res) => {
   try {
     const token = await getToken();
     const now = Math.floor(Date.now() / 1000);
-    
+
     if (!token) {
       return res.json({
         has_token: false,
-        message: 'No token found in database'
+        message: 'No token found'
       });
     }
-    
+
     res.json({
       has_token: true,
-      has_access_token: !!token.access_token,
-      has_refresh_token: !!token.refresh_token,
       expires_at: token.expires_at,
-      expires_in_seconds: token.expires_at - now,
       is_expired: token.expires_at < now,
-      token_type: token.token_type,
+      access_token_present: !!token.access_token,
+      refresh_token_present: !!token.refresh_token,
+      expires_in_seconds: token.expires_at - now,
       scope: token.scope
     });
-    
   } catch (err) {
-    console.error('❌ Token verification failed:', err);
+    console.error('❌ Token verification failed:', err.message);
     res.status(500).json({
       error: 'Token verification failed',
       message: err.message
