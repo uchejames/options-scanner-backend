@@ -8,46 +8,56 @@ const {
   SCHWAB_REDIRECT_URI
 } = process.env;
 
-// ✅ Save token with expiration time
+// Encode client credentials for Basic Auth
+const getBasicAuthHeader = () => {
+  const base64 = Buffer.from(`${SCHWAB_CLIENT_ID}:${SCHWAB_CLIENT_SECRET}`).toString('base64');
+  return `Basic ${base64}`;
+};
+
+// Save token with expiration time
 const saveToken = async (tokenData) => {
-  const now = Math.floor(Date.now() / 1000); // Unix timestamp (seconds)
+  const now = Math.floor(Date.now() / 1000);
   const tokenWithExpiry = {
     ...tokenData,
-    expires_at: now + tokenData.expires_in // expires_in is seconds
+    expires_at: now + tokenData.expires_in
   };
 
-  await Token.deleteMany(); // Clear any old token
+  await Token.deleteMany(); // Clear previous tokens
   await Token.create(tokenWithExpiry);
   console.log("✅ Schwab token saved to MongoDB with expiry");
 };
 
-// ✅ Fetch token from MongoDB
+// Get the most recent token
 const getToken = async () => {
   const token = await Token.findOne();
   return token ? token.toObject() : null;
 };
 
-// ✅ Refresh token using refresh_token
+// Refresh access token with refresh_token
 const refreshToken = async () => {
   const current = await getToken();
   if (!current?.refresh_token) throw new Error('No refresh token available');
 
-  const response = await axios.post('https://api.schwabapi.com/v1/oauth/token', qs.stringify({
-    grant_type: 'refresh_token',
-    refresh_token: current.refresh_token,
-    client_id: SCHWAB_CLIENT_ID,
-    client_secret: SCHWAB_CLIENT_SECRET
-  }), {
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded'
+  const response = await axios.post(
+    'https://api.schwabapi.com/v1/oauth/token',
+    qs.stringify({
+      grant_type: 'refresh_token',
+      refresh_token: current.refresh_token,
+      redirect_uri: SCHWAB_REDIRECT_URI
+    }),
+    {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': getBasicAuthHeader()
+      }
     }
-  });
+  );
 
   await saveToken(response.data);
   return response.data;
 };
 
-// ✅ Get valid access_token (refresh if expired)
+// Get valid token (refresh if expired)
 const getAccessToken = async () => {
   const token = await getToken();
   const now = Math.floor(Date.now() / 1000);
@@ -60,7 +70,7 @@ const getAccessToken = async () => {
   return token.access_token;
 };
 
-// ✅ Fetch stock quote using Schwab MarketData API
+// Get stock quote using Schwab API
 const getQuote = async (symbol = 'AAPL') => {
   const accessToken = await getAccessToken();
 
@@ -73,7 +83,6 @@ const getQuote = async (symbol = 'AAPL') => {
   return res.data;
 };
 
-// ✅ Export functions
 module.exports = {
   saveToken,
   getToken,
