@@ -74,7 +74,7 @@ const getAccessToken = async () => {
 const getQuote = async (symbol = 'AAPL') => {
   const accessToken = await getAccessToken();
 
-  const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/quotes/${symbol}`, {
+  const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/quotes?symbols=${symbol}`, {
     headers: {
       Authorization: `Bearer ${accessToken}`
     }
