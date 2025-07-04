@@ -1,3 +1,9 @@
+const express = require('express');
+const router = express.Router();
+const axios = require('axios');
+const qs = require('qs');
+const { getBasicAuthHeader, saveToken, getToken } = require('./auth'); // Adjust the path as necessary
+
 // Enhanced callback route with full debugging
 router.get('/callback', async (req, res) => {
   const code = req.query.code;
@@ -150,3 +156,5 @@ router.get('/verify-token', async (req, res) => {
     });
   }
 });
+
+module.exports = router;
