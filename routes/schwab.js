@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const qs = require('qs');
-const { saveToken, getToken } = require('../utils/schwab'); // ✅ Correct import
+const { saveToken, getToken, getQuote } = require('../utils/schwab'); // ✅ Correct import
 
 const {
   SCHWAB_CLIENT_ID,
@@ -145,6 +145,27 @@ router.get('/verify-token', async (req, res) => {
     res.status(500).json({
       error: 'Token verification failed',
       message: err.message
+    });
+  }
+});
+
+// ✅ GET /api/schwab/data?symbol=TSLA
+router.get('/data', async (req, res) => {
+  try {
+    const symbol = req.query.symbol || 'AAPL';
+    console.log('📈 Fetching quote for: ${symbol}');
+    const quote = await getQuote(symbol);
+    res.json({
+      success: true,
+      symbol,
+      quote
+    });
+  } catch (err) {
+    console.error('❌ Error fetching quote:', err.message);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching quote',
+      error: err.message
     });
   }
 });
