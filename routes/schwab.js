@@ -2,13 +2,19 @@ const express = require('express');
 const router = express.Router();
 const axios = require('axios');
 const qs = require('qs');
-const { getBasicAuthHeader, saveToken, getToken } = require('../utils/schwab'); // Adjust path if needed
+const { saveToken, getToken } = require('../utils/schwab'); // ✅ Correct import
 
 const {
   SCHWAB_CLIENT_ID,
   SCHWAB_CLIENT_SECRET,
   SCHWAB_REDIRECT_URI
 } = process.env;
+
+// ✅ Define Basic Auth header function FIRST
+const getBasicAuthHeader = () => {
+  const base64 = Buffer.from(`${SCHWAB_CLIENT_ID}:${SCHWAB_CLIENT_SECRET}`).toString('base64');
+  return `Basic ${base64}`;
+};
 
 // 🔐 Step 1: Start Schwab OAuth Login
 router.get('/connect', (req, res) => {
@@ -18,7 +24,7 @@ router.get('/connect', (req, res) => {
 
   const scopes = 'read_content read_product read_client read_account read_trade';
   const authUrl = new URL('https://api.schwabapi.com/v1/oauth/authorize');
-  
+
   authUrl.searchParams.append('client_id', SCHWAB_CLIENT_ID);
   authUrl.searchParams.append('response_type', 'code');
   authUrl.searchParams.append('redirect_uri', SCHWAB_REDIRECT_URI);
