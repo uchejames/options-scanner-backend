@@ -87,20 +87,30 @@ const getQuote = async (symbol = 'AAPL') => {
 const getOptionsChain = async (symbol) => {
   const accessToken = await getAccessToken();
 
-  const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/chains/${symbol}`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: 'application/json'
-    },
-    params: {
-      contractType: 'ALL',
-      includeQuotes: true,
-      strategy: 'SINGLE'
-    }
-  });
+  try {
+    const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/chains/${symbol}`, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json'
+      },
+      params: {
+        contractType: 'ALL',
+        includeQuotes: true,
+        strategy: 'SINGLE'
+      }
+    });
 
-  return res.data;
+    return res.data;
+  } catch (err) {
+    console.error('🛑 Options Chain Error Details:', {
+      status: err.response?.status,
+      statusText: err.response?.statusText,
+      data: err.response?.data
+    });
+    throw err;
+  }
 };
+
 
 
 
