@@ -172,8 +172,8 @@ router.get('/data', async (req, res) => {
 
 
 // ✅ Endpoint: GET /api/schwab/options/:symbol
-router.get('/options', async (req, res) => {
-  const symbol = req.query.symbol;
+router.get(['/options', '/options/:symbol'], async (req, res) => {
+  const symbol = (req.params.symbol || req.query.symbol || '').toUpperCase();
 
   if (!symbol) {
     return res.status(400).json({ success: false, message: 'Missing symbol query param' });
