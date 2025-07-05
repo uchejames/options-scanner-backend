@@ -172,22 +172,28 @@ router.get('/data', async (req, res) => {
 
 
 // ✅ Endpoint: GET /api/schwab/options/:symbol
-router.get('/options/:symbol', async (req, res) => {
-  const symbol = req.params.symbol?.toUpperCase();
+router.get('/options', async (req, res) => {
+  const symbol = req.query.symbol;
+
+  if (!symbol) {
+    return res.status(400).json({ success: false, message: 'Missing symbol query param' });
+  }
 
   try {
-    const data = await getOptionsChain(symbol);
+    const data = await getOptionsChain(symbol.toUpperCase());
+
     res.json({
       success: true,
       symbol,
       options: data
     });
-  } catch (err) {
-    console.error('❌ Error fetching options:', err.message);
+
+  } catch (error) {
+    console.error('❌ Error fetching options chain:', error.message);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch options chain',
-      error: err.message
+      message: 'Error fetching options chain',
+      error: error.message
     });
   }
 });
