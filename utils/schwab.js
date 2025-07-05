@@ -83,10 +83,24 @@ const getQuote = async (symbol = 'AAPL') => {
   return res.data;
 };
 
+// Fetch Full Options Chain
+const getOptionsChain = async (symbol) => {
+  const accessToken = await getAccessToken();
+
+  const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/chains/${symbol}`, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    }
+  });
+
+  return res.data;
+};
+
 module.exports = {
   saveToken,
   getToken,
   refreshToken,
   getAccessToken,
-  getQuote
+  getQuote,
+  getOptionsChain
 };
