@@ -89,7 +89,8 @@ const getOptionsChain = async (symbol) => {
 
   const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/chains/${symbol}`, {
     headers: {
-      Authorization: `Bearer ${accessToken}`
+      Authorization: `Bearer ${accessToken}`,
+      Accept: 'application/json'
     },
     params: {
       contractType: 'ALL',
@@ -100,6 +101,7 @@ const getOptionsChain = async (symbol) => {
 
   return res.data;
 };
+
 
 
 module.exports = {
