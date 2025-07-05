@@ -83,29 +83,30 @@ const getQuote = async (symbol = 'AAPL') => {
   return res.data;
 };
 
-// Fetch Full Options Chain
+// Fetch Full Options Chain - CORRECTED VERSION
 const getOptionsChain = async (symbol) => {
   const accessToken = await getAccessToken();
-
   try {
-    const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/chains/${symbol}`, {
+    const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/chains`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: 'application/json'
       },
       params: {
+        symbol: symbol.toUpperCase(), // ✅ Symbol as query parameter
         contractType: 'ALL',
         includeQuotes: true,
         strategy: 'SINGLE'
       }
     });
-
     return res.data;
   } catch (err) {
     console.error('🛑 Options Chain Error Details:', {
       status: err.response?.status,
       statusText: err.response?.statusText,
-      data: err.response?.data
+      data: err.response?.data,
+      url: err.config?.url,
+      params: err.config?.params
     });
     throw err;
   }
