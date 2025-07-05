@@ -87,7 +87,7 @@ const getQuote = async (symbol = 'AAPL') => {
 const getOptionsChain = async (symbol) => {
   const accessToken = await getAccessToken();
 
-  const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/chains/${symbol}`, {
+  const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/chains/AAPL?contractType=ALL&includeQuotes=TRUE&strategy=SINGLE`, {
     headers: {
       Authorization: `Bearer ${accessToken}`
     },
