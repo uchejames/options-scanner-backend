@@ -84,6 +84,37 @@ const getQuote = async (symbol = 'AAPL') => {
 };
 
 // Fetch Full Options Chain - CORRECTED VERSION
+// Helper to flatten Schwab options chain response
+const flattenOptionsChain = (chainData, symbol) => {
+  let options = [];
+  // Schwab returns optionPairs (array) for most symbols
+  if (Array.isArray(chainData.optionPairs)) {
+    options = chainData.optionPairs.map(pair => ({ ...pair, sourceSymbol: symbol }));
+  }
+  // Some responses use callExpDateMap/putExpDateMap (object)
+  else if (chainData.callExpDateMap || chainData.putExpDateMap) {
+    const extractFromMap = (expDateMap, type) => {
+      let arr = [];
+      for (const exp in expDateMap) {
+        for (const strike in expDateMap[exp]) {
+          for (const opt of expDateMap[exp][strike]) {
+            arr.push({ ...opt, optionType: type, sourceSymbol: symbol });
+          }
+        }
+      }
+      return arr;
+    };
+    if (chainData.callExpDateMap) {
+      options = options.concat(extractFromMap(chainData.callExpDateMap, 'CALL'));
+    }
+    if (chainData.putExpDateMap) {
+      options = options.concat(extractFromMap(chainData.putExpDateMap, 'PUT'));
+    }
+  }
+  // Fallback: return empty array if no options found
+  return options;
+};
+
 const getOptionsChain = async (symbol) => {
   const accessToken = await getAccessToken();
   try {
@@ -93,13 +124,14 @@ const getOptionsChain = async (symbol) => {
         Accept: 'application/json'
       },
       params: {
-        symbol: symbol.toUpperCase(), // ✅ Symbol as query parameter
+        symbol: symbol.toUpperCase(),
         contractType: 'ALL',
         includeQuotes: true,
         strategy: 'SINGLE'
       }
     });
-    return res.data;
+    // Normalize and flatten options for frontend
+    return flattenOptionsChain(res.data, symbol);
   } catch (err) {
     console.error('🛑 Options Chain Error Details:', {
       status: err.response?.status,

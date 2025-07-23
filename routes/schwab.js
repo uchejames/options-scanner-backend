@@ -172,30 +172,45 @@ router.get('/data', async (req, res) => {
 
 
 // ✅ Endpoint: GET /api/schwab/options/:symbol
+// ✅ Endpoint: GET /api/schwab/options/:symbol or /api/schwab/options?symbols=SPY,QQQ,TSLA
 router.get(['/options', '/options/:symbol'], async (req, res) => {
-  const symbol = (req.params.symbol || req.query.symbol || '').toUpperCase();
-
-  if (!symbol) {
-    return res.status(400).json({ success: false, message: 'Missing symbol query param' });
+  let symbols = [];
+  if (req.params.symbol) {
+    symbols = [req.params.symbol.toUpperCase()];
+  } else if (req.query.symbol) {
+    symbols = [req.query.symbol.toUpperCase()];
+  } else if (req.query.symbols) {
+    symbols = req.query.symbols.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
   }
 
-  try {
-    const data = await getOptionsChain(symbol.toUpperCase());
-
-    res.json({
-      success: true,
-      symbol,
-      options: data
-    });
-
-  } catch (error) {
-    console.error('❌ Error fetching options chain:', error.message);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching options chain',
-      error: error.message
-    });
+  if (!symbols.length) {
+    return res.status(400).json({ success: false, message: 'Missing symbol(s) query param' });
   }
+
+  let allOptions = [];
+  let failedSymbols = [];
+  for (const symbol of symbols) {
+    try {
+      const data = await getOptionsChain(symbol);
+      if (Array.isArray(data)) {
+        allOptions.push(...data);
+      }
+    } catch (err) {
+      console.error(`❌ Error fetching options for ${symbol}:`, err.message);
+      failedSymbols.push(symbol);
+    }
+  }
+  const response = {
+    success: true,
+    symbols,
+    options: allOptions
+  };
+  if (failedSymbols.length) {
+    response.partial = true;
+    response.failedSymbols = failedSymbols;
+    response.message = `Some symbols failed: ${failedSymbols.join(', ')}`;
+  }
+  res.json(response);
 });
 
 module.exports = router;
