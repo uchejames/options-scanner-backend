@@ -191,7 +191,16 @@ router.get(['/options', '/options/:symbol'], async (req, res) => {
   let failedSymbols = [];
   for (const symbol of symbols) {
     try {
+      console.log(`🔍 Backend: Fetching options for symbol: ${symbol}`);
+      const token = await getToken();
+      if (!token || !token.access_token) {
+        console.error(`❌ No valid Schwab token for ${symbol}`);
+        failedSymbols.push(symbol);
+        continue;
+      }
+      console.log(`🔑 Token expires at: ${token.expires_at}, is_expired: ${token.expires_at < Math.floor(Date.now() / 1000)}`);
       const data = await getOptionsChain(symbol);
+      console.log(`🔍 Raw Schwab options chain response for ${symbol}:`, Array.isArray(data) ? `Array(${data.length})` : data);
       if (Array.isArray(data)) {
         allOptions.push(...data);
       }
