@@ -1,26 +1,21 @@
-// backend/services/intradayService.js
 const axios = require("axios");
-const { getAccessToken } = require("../utils/schwab"); // you already have this
+const { getAccessToken } = require("../utils/schwab");
 
-// Fetch intraday data (15-min intervals)
 const getIntradayData = async (symbol, interval = "15m") => {
   try {
     const accessToken = await getAccessToken();
 
-    const res = await axios.get(
-      `https://api.schwabapi.com/marketdata/v1/pricehistory`,
-      {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        params: {
-          symbol: symbol.toUpperCase(),
-          periodType: "day",
-          period: 1,          // last trading day
-          frequencyType: "minute",
-          frequency: 15,      // 15-min candles
-          needExtendedHoursData: false
-        }
-      }
-    );
+    const res = await axios.get(`https://api.schwabapi.com/marketdata/v1/pricehistory`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      params: {
+        symbol: symbol.toUpperCase(),
+        periodType: "day",
+        period: 1,
+        frequencyType: "minute",
+        frequency: parseInt(interval) || 15,
+        needExtendedHoursData: false,
+      },
+    });
 
     return res.data;
   } catch (err) {
@@ -29,4 +24,14 @@ const getIntradayData = async (symbol, interval = "15m") => {
   }
 };
 
-module.exports = { getIntradayData };
+const getMultipleIntradayData = async (symbols, interval = "15m") => {
+  const promises = symbols.map((symbol) => getIntradayData(symbol, interval));
+  const results = await Promise.allSettled(promises);
+  return results.map((result, index) => ({
+    symbol: symbols[index],
+    data: result.status === "fulfilled" ? result.value : null,
+    error: result.status === "rejected" ? result.reason.message : null,
+  }));
+};
+
+module.exports = { getIntradayData, getMultipleIntradayData };
