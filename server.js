@@ -17,6 +17,7 @@ connectDB();
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/schwab', require('./routes/schwab'));
 app.use('/api/intraday', require('./routes/intraday')); // ✅ added intraday route
+app.use('/api/stage4', require('./routes/stage4'));// stage 4 routes
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
