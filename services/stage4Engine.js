@@ -4,34 +4,85 @@ const math = create(all);
 
 // Configure mathjs to avoid dangerous functions
 math.import({
-  // prevent access to dangerous things
   import: () => { throw new Error('import is disabled'); },
-  createUnit: () => { throw new Error('createUnit is disabled'); },
-  evaluate: math.evaluate,
-  parse: math.parse
+  createUnit: () => { throw new Error('createUnit is disabled'); }
 }, { override: true });
 
-let currentConfig = {
-  formulas: [
-    '0','0','0','0','0'
-  ],
-  thresholds: [
-    { min: -25, max: -20 },
-    { min: -20, max: -15 },
-    { min: -15, max: -10 },
-    { min: -10, max: -5 },
-    { min: -8,  max: -3 }
-  ],
-  buffer: 0 // optional buffer for dark-orange
-};
+// ---------- Utilities: parse TOS-like script to extract plot expressions ----------
+/**
+ * extractPlotExpressions
+ * - Parses TOS/ThinkScript-like text and extracts RHS of `plot <name> = <expr>;` lines.
+ * - Returns array of objects: { name, exprRaw }
+ */
+function extractPlotExpressions(scriptText) {
+  if (!scriptText || typeof scriptText !== 'string') return [];
+  const plots = [];
+  // remove SetDefaultColor, comments and trailing semicolons handling
+  const cleaned = scriptText
+    .replace(/\/\/.*$/gm, '')          // remove // comments
+    .replace(/\/\*[\s\S]*?\*\//g, '')  // remove /* ... */ comments
+    .replace(/\r\n/g, '\n');
 
-function setStudyConfig({ formulas, thresholds, buffer }) {
-  if (Array.isArray(formulas) && formulas.length === 5) currentConfig.formulas = formulas;
-  if (Array.isArray(thresholds) && thresholds.length === 5) currentConfig.thresholds = thresholds;
-  if (typeof buffer === 'number') currentConfig.buffer = buffer;
+  // regex: find "plot NAME = <anything until ;>"
+  const plotRegex = /plot\s+([A-Za-z0-9_]+)\s*=\s*([^;]+);/gi;
+  let m;
+  while ((m = plotRegex.exec(cleaned)) !== null) {
+    const name = m[1];
+    const exprRaw = m[2].trim();
+    if (exprRaw) plots.push({ name, exprRaw });
+  }
+  return plots;
 }
 
-// helper: build series object from candles
+// ---------- Normalize TOS-like expressions to mathjs-friendly forms ----------
+function normalizeFormula(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+
+  let s = raw;
+
+  // common TOS functions -> map to our sma helper
+  // SimpleMovingAvg(x, n) => sma(x, n)
+  s = s.replace(/SimpleMovingAvg\s*\(/gi, 'sma(');
+  s = s.replace(/Average\s*\(/gi, 'sma('); // sometimes 'Average'
+
+  // transform e.g. low[2] -> off("low",2)
+  s = s.replace(/(\b(?:open|high|low|close|volume|oi|delta|gamma|theo|mark|ask|bid))\s*\[\s*(\d+)\s*\]/gi,
+    (_, name, n) => `off("${name}", ${n})`
+  );
+
+  // transform sma(close,5,2) or sma(close,5) -> sma("close",5,2) or sma("close",5)
+  s = s.replace(/sma\(\s*(\b(?:open|high|low|close|volume|oi|delta|gamma|theo|mark|ask|bid))\s*,\s*(\d+)(?:\s*,\s*(\d+)\s*)?\)/gi,
+    (_, name, len, off) => {
+      if (off) return `sma("${name}", ${len}, ${off})`;
+      return `sma("${name}", ${len})`;
+    }
+  );
+
+  // Replace references like (low + close) / 2  — ok for mathjs
+  // Remove TOS style function calls we don't support as-is (like SetDefaultColor)
+  s = s.replace(/SetDefaultColor\([^)]*\)/gi, '');
+  s = s.replace(/SetPaintingStrategy\([^)]*\)/gi, '');
+  s = s.replace(/declare\s+[A-Za-z0-9_()\s]*/gi, '');
+
+  // Replace double pipes or long boolean operators not used; keep expression simple
+  // Trim whitespace
+  s = s.trim();
+  return s;
+}
+
+// ---------- Compile a normalized formula string into a mathjs node ----------
+function compileFormula(str) {
+  const normalized = normalizeFormula(str);
+  if (!normalized) return null;
+  try {
+    return math.parse(normalized);
+  } catch (err) {
+    console.error('Formula compile error:', err.message, 'for:', str);
+    return null;
+  }
+}
+
+// ---------- Build series helpers for mathjs evaluation ----------
 function buildSeries(candles) {
   const series = {
     open: candles.map(c => c.open ?? 0),
@@ -43,13 +94,15 @@ function buildSeries(candles) {
     delta: candles.map(c => c.delta ?? 0),
     gamma: candles.map(c => c.gamma ?? 0),
     theo: candles.map(c => c.theo ?? 0),
+    mark: candles.map(c => c.mark ?? 0),
+    ask: candles.map(c => c.ask ?? 0),
+    bid: candles.map(c => c.bid ?? 0)
   };
 
   const getAt = (arr, idx) => (idx >= 0 && idx < arr.length ? arr[idx] : 0);
 
   const ctxForIndex = (i) => {
     return {
-      // current bar fields
       open: series.open[i],
       high: series.high[i],
       low: series.low[i],
@@ -59,8 +112,11 @@ function buildSeries(candles) {
       delta: series.delta[i],
       gamma: series.gamma[i],
       theo: series.theo[i],
+      mark: series.mark[i],
+      ask: series.ask[i],
+      bid: series.bid[i],
 
-      // helper functions for formulas
+      // off(name, offset)
       off: function(name, offset = 0) {
         const arr = series[name];
         if (!arr) return 0;
@@ -68,6 +124,7 @@ function buildSeries(candles) {
         return getAt(arr, idx);
       },
 
+      // sma(name, length, offset)
       sma: function(name, length = 1, offset = 0) {
         const arr = series[name];
         if (!arr) return 0;
@@ -86,58 +143,28 @@ function buildSeries(candles) {
   return { ctxForIndex };
 }
 
-// normalize TOS-like syntax to mathjs expressions
-function normalizeFormula(raw) {
-  if (!raw || typeof raw !== 'string') return '';
-  let s = raw;
+// ---------- Evaluate a set of formulas on one candle series ----------
+// formulas: array of formula strings (mathjs-compatible after normalization)
+// returns { labels: [...numbers|null], compiledCount }
+function evaluateFormulasOnCandles(candles, formulas = []) {
+  const { ctxForIndex } = buildSeries(candles || []);
+  const compiled = (Array.isArray(formulas) ? formulas : []).map(f => compileFormula(f));
+  const lastIndex = (candles && candles.length) ? candles.length - 1 : -1;
 
-  // transform e.g. close[2] -> off("close",2)
-  s = s.replace(/(\b(?:open|high|low|close|volume|oi|delta|gamma|theo))\s*\[\s*(\d+)\s*\]/gi,
-    (_, name, n) => `off("${name}", ${n})`
-  );
-
-  // transform sma(close,5) -> sma("close",5)
-  s = s.replace(/sma\(\s*(\b(?:open|high|low|close|volume|oi|delta|gamma|theo))\s*,\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)/gi,
-    (_, name, len, off) => {
-      if (off) return `sma("${name}", ${len}, ${off})`;
-      return `sma("${name}", ${len})`;
-    }
-  );
-
-  // allow basic math and functions only — mathjs parse will handle safety
-  return s;
-}
-
-function compileFormula(str) {
-  const normalized = normalizeFormula(str);
-  if (!normalized.trim()) return null;
-  try {
-    return math.parse(normalized);
-  } catch (err) {
-    console.error('Formula compile error:', err.message, 'for:', str);
-    return null;
-  }
-}
-
-function evaluateFormulasOnCandles(candles) {
-  const { ctxForIndex } = buildSeries(candles);
-  const compiled = currentConfig.formulas.map(f => compileFormula(f));
-  const lastIndex = candles.length - 1;
   if (lastIndex < 0) {
-    return { labels: [null,null,null,null,null], thresholds: currentConfig.thresholds };
+    // return same-length array of nulls
+    return { labels: compiled.map(() => null), compiledCount: compiled.length };
   }
-  const ctx = ctxForIndex(lastIndex);
 
+  const ctx = ctxForIndex(lastIndex);
   const scope = {
-    // spread ctx keys into scope for mathjs evaluate (the parse nodes will look up these names)
     ...ctx,
-    // bind functions explicitly so mathjs can call them
     off: ctx.off,
     sma: ctx.sma,
-    // Math helpers
     abs: Math.abs,
     min: Math.min,
     max: Math.max,
+    log: Math.log
   };
 
   const labels = compiled.map((node, i) => {
@@ -152,10 +179,61 @@ function evaluateFormulasOnCandles(candles) {
     }
   });
 
-  return { labels, thresholds: currentConfig.thresholds, buffer: currentConfig.buffer };
+  return { labels, compiledCount: compiled.length };
+}
+
+// ---------- Evaluate multiple rows (symbols). Each row must include `candles` array ----------
+/**
+ * evaluateRows(rows, studyScriptsFlat)
+ * - rows: [{ symbol, candles: [...] , ... }, ...]
+ * - studyScriptsFlat: array of formula strings (flat order e.g. study1_label1, study1_label2, ... up to 25)
+ * If studyScriptsFlat is empty or missing, engine will instead accept studyScriptsRaw: { study1: 'script text', ... }
+ * and attempt to extract plots from those scripts (in plot order).
+ *
+ * Returns: array of results [{ symbol, labels: [...], study1: val, ..., studyN: val }, ...]
+ */
+function evaluateRows(rows = [], studyScriptsFlat = [], studyScriptsRaw = {}) {
+  // If studyScriptsFlat empty but studyScriptsRaw provided, extract formulas from raw scripts
+  let formulas = Array.isArray(studyScriptsFlat) ? [...studyScriptsFlat] : [];
+  if ((!formulas || formulas.length === 0) && studyScriptsRaw && typeof studyScriptsRaw === 'object') {
+    // attempt extraction in study1..study5 order, taking plot expressions in each script
+    for (let s = 1; s <= 5; s++) {
+      const key = `study${s}`;
+      const script = studyScriptsRaw[key];
+      if (!script) continue;
+      const plots = extractPlotExpressions(script).map(p => p.exprRaw);
+      for (const p of plots) {
+        formulas.push(p);
+        if (formulas.length >= 25) break;
+      }
+      if (formulas.length >= 25) break;
+    }
+  }
+
+  // fallback: ensure formulas array length <=25
+  if (!Array.isArray(formulas)) formulas = [];
+  if (formulas.length > 25) formulas = formulas.slice(0, 25);
+
+  // Evaluate each row
+  const out = rows.map((row) => {
+    const candles = Array.isArray(row.candles) ? row.candles : (row.candlesRaw || []);
+    const { labels } = evaluateFormulasOnCandles(candles, formulas);
+    // Build per-study fields study1..studyN where N = labels.length
+    const result = { symbol: row.symbol, labels: labels.slice() };
+    labels.forEach((v, idx) => {
+      const key = `study${idx + 1}`; // study1..study25
+      result[key] = (v === null ? null : Number(v));
+    });
+    return result;
+  });
+
+  return out;
 }
 
 module.exports = {
-  setStudyConfig,
-  evaluateFormulasOnCandles
+  extractPlotExpressions,
+  normalizeFormula,
+  compileFormula,
+  evaluateFormulasOnCandles,
+  evaluateRows
 };
