@@ -98,33 +98,52 @@ const scanStage3Rows = async (req, res) => {
         theo: c.theo
       }));
 
-      // 🔹 Evaluate all 5 studies (each with 5 labels)
+      // ðŸ"¹ Evaluate all 5 studies (each study has 1 formula that may output multiple plots)
       const studyLabels = {};
       for (let i = 1; i <= 5; i++) {
         const studyKey = `study${i}`;
         const cfg = studies[studyKey] || {};
-        const formulas = Array.isArray(cfg.formulas) ? cfg.formulas : Array(5).fill('0');
-        const thresholds = Array.isArray(cfg.thresholds)
-          ? cfg.thresholds
-          : Array(5).fill({ min: null, max: null });
-        const buffer = typeof cfg.buffer === 'number' ? cfg.buffer : 0;
+        const formula = cfg.formula || '';
+        const thresholds = Array.isArray(cfg.thresholds) ? cfg.thresholds : [];
 
-        // Apply study config dynamically
-        setStudyConfig({ formulas, thresholds, buffer });
+        if (!formula || formula.trim() === '') {
+          // No formula provided, skip this study
+          studyLabels[studyKey] = Array(5).fill(null).map(() => ({ value: null, status: 'empty' }));
+          continue;
+        }
 
-        const { labels, thresholds: thrSet, buffer: buf } = evaluateFormulasOnCandles(candles);
+        // Extract plot expressions from TOS script
+        const { extractPlotExpressions, evaluateFormulasOnCandles } = require('../services/stage4Engine');
+        const plots = extractPlotExpressions(formula);
+        const plotFormulas = plots.map(p => p.exprRaw);
 
-        // 🔸 Prepare label objects with evaluation status
-        const labelObjects = (labels || []).map((v, j) => {
-          const thr = thrSet?.[j] || { min: null, max: null };
+        // Evaluate formulas on candles
+        const { labels } = evaluateFormulasOnCandles(candles, plotFormulas);
+
+        // Create label objects with threshold evaluation
+        const labelObjects = labels.slice(0, 5).map((v, j) => {
+          const thr = thresholds[j] || { min: null, max: null };
           let status = 'unknown';
-          if (v == null) status = 'unknown';
-          else if (thr.min != null && v < thr.min) status = 'below';
-          else if (thr.max != null && v > thr.max + (buf || 0)) status = 'farAbove';
-          else if (thr.max != null && v > thr.max) status = 'above';
-          else status = 'within';
+          
+          if (v == null) {
+            status = 'unknown';
+          } else {
+            const hasMin = thr.min !== null && thr.min !== undefined;
+            const hasMax = thr.max !== null && thr.max !== undefined;
+            
+            if (hasMin && v < thr.min) status = 'below';
+            else if (hasMax && v > thr.max) status = 'above';
+            else if (hasMin || hasMax) status = 'within';
+            else status = 'noFilter';
+          }
+          
           return { value: v, min: thr.min, max: thr.max, status };
         });
+
+        // Pad to 5 labels if needed
+        while (labelObjects.length < 5) {
+          labelObjects.push({ value: null, status: 'empty' });
+        }
 
         studyLabels[studyKey] = labelObjects;
       }
@@ -139,7 +158,28 @@ const scanStage3Rows = async (req, res) => {
         [];
 
       for (const r of rowsForU) {
-        resultRows.push({ ...r, labels: studyLabels, underlying: u });
+        // Flatten study labels into study1-study25 fields
+        const flattenedLabels = {};
+        let labelIndex = 1;
+        
+        for (let s = 1; s <= 5; s++) {
+          const studyKey = `study${s}`;
+          const studyData = studyLabels[studyKey] || [];
+          
+          for (let l = 0; l < 5; l++) {
+            const labelData = studyData[l] || { value: null, status: 'unknown' };
+            const fieldKey = `study${labelIndex}`;
+            flattenedLabels[fieldKey] = labelData.value; // Just the numeric value
+            labelIndex++;
+          }
+        }
+        
+        resultRows.push({ 
+          ...r, 
+          ...flattenedLabels, // study1, study2, ..., study25 
+          studyLabels, // Also keep nested structure for debugging
+          underlying: u 
+        });
       }
     }
 
