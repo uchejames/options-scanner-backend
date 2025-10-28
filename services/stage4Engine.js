@@ -12,26 +12,77 @@ math.import({
 /**
  * extractPlotExpressions
  * - Parses TOS/ThinkScript-like text and extracts RHS of `plot <name> = <expr>;` lines.
- * - Returns array of objects: { name, exprRaw }
+ * - Returns object: { plots: [{name, exprRaw}], defs: {...} }
  */
-function extractPlotExpressions(scriptText) {
-  if (!scriptText || typeof scriptText !== 'string') return [];
+function extractPlotExpressions(scriptText, inputs = {}) {
+  if (!scriptText || typeof scriptText !== 'string') return { plots: [], defs: {} };
   const plots = [];
+  const defs = {};
+  
   // remove SetDefaultColor, comments and trailing semicolons handling
-  const cleaned = scriptText
+  let cleaned = scriptText
     .replace(/\/\/.*$/gm, '')          // remove // comments
     .replace(/\/\*[\s\S]*?\*\//g, '')  // remove /* ... */ comments
     .replace(/\r\n/g, '\n');
+
+  // ✅ FIX: Convert boolean operators EARLY (before substitution)
+  cleaned = cleaned.replace(/\band\b/gi, ' && ');
+  cleaned = cleaned.replace(/\bor\b/gi, ' || ');
+
+  // Extract input declarations and use default values
+  const inputRegex = /input\s+([A-Za-z0-9_]+)\s*=\s*([^;]+);/gi;
+  let inputMatch;
+  while ((inputMatch = inputRegex.exec(cleaned)) !== null) {
+    const inputName = inputMatch[1];
+    const inputValue = inputMatch[2].trim();
+    // Use provided input or default value
+    inputs[inputName] = inputs[inputName] || inputValue;
+  }
+  
+  // Replace input references with their values
+  Object.keys(inputs).forEach(inputName => {
+    const regex = new RegExp(`\\b${inputName}\\b`, 'g');
+    cleaned = cleaned.replace(regex, inputs[inputName]);
+  });
+
+  // Extract def declarations
+  const defRegex = /def\s+([A-Za-z0-9_]+)\s*=\s*([^;]+);/gi;
+  let defMatch;
+  while ((defMatch = defRegex.exec(cleaned)) !== null) {
+    defs[defMatch[1]] = defMatch[2].trim();
+  }
+
+  // ✅ FIX #2: Pre-process Highest/Lowest with expressions into temp defs
+  let defCounter = 0;
+  cleaned = cleaned.replace(/Highest\(\s*\(([^)]+)\)\s*,\s*(\d+)\s*\)/gi, (match, expr, period) => {
+    const tempDef = `_tempHighest${defCounter++}`;
+    defs[tempDef] = expr;
+    return `Highest(${tempDef}, ${period})`;
+  });
+
+  cleaned = cleaned.replace(/Lowest\(\s*\(([^)]+)\)\s*,\s*(\d+)\s*\)/gi, (match, expr, period) => {
+    const tempDef = `_tempLowest${defCounter++}`;
+    defs[tempDef] = expr;
+    return `Lowest(${tempDef}, ${period})`;
+  });
 
   // regex: find "plot NAME = <anything until ;>"
   const plotRegex = /plot\s+([A-Za-z0-9_]+)\s*=\s*([^;]+);/gi;
   let m;
   while ((m = plotRegex.exec(cleaned)) !== null) {
     const name = m[1];
-    const exprRaw = m[2].trim();
+    let exprRaw = m[2].trim();
+    
+    // Substitute def variables in expression
+    Object.keys(defs).forEach(defName => {
+      const regex = new RegExp(`\\b${defName}\\b`, 'g');
+      exprRaw = exprRaw.replace(regex, `(${defs[defName]})`);
+    });
+    
     if (exprRaw) plots.push({ name, exprRaw });
   }
-  return plots;
+  
+  return { plots, defs };
 }
 
 // ---------- Normalize TOS-like expressions to mathjs-friendly forms ----------
@@ -44,6 +95,33 @@ function normalizeFormula(raw) {
   // SimpleMovingAvg(x, n) => sma(x, n)
   s = s.replace(/SimpleMovingAvg\s*\(/gi, 'sma(');
   s = s.replace(/Average\s*\(/gi, 'sma('); // sometimes 'Average'
+  
+  // Add support for TOS built-in functions
+  s = s.replace(/Highest\s*\(/gi, 'highest(');
+  s = s.replace(/Lowest\s*\(/gi, 'lowest(');
+  
+  // Quote def variable names in highest/lowest calls
+  // Pattern: highest(varName, n) where varName is a single word
+  s = s.replace(/highest\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,/gi, (match, varName) => {
+    // Check if it's already quoted or is a series name
+    if (['open', 'high', 'low', 'close', 'volume', 'oi', 'delta', 'gamma', 'theo', 'mark', 'ask', 'bid'].includes(varName.toLowerCase())) {
+      return `highest("${varName}", `;
+    }
+    // It's likely a def variable name
+    return `highest("${varName}", `;
+  });
+  
+  s = s.replace(/lowest\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,/gi, (match, varName) => {
+    // Check if it's already quoted or is a series name
+    if (['open', 'high', 'low', 'close', 'volume', 'oi', 'delta', 'gamma', 'theo', 'mark', 'ask', 'bid'].includes(varName.toLowerCase())) {
+      return `lowest("${varName}", `;
+    }
+    // It's likely a def variable name
+    return `lowest("${varName}", `;
+  });
+  
+  s = s.replace(/Max\s*\(/gi, 'max(');
+  s = s.replace(/Min\s*\(/gi, 'min(');
 
   // transform e.g. low[2] -> off("low",2)
   s = s.replace(/(\b(?:open|high|low|close|volume|oi|delta|gamma|theo|mark|ask|bid))\s*\[\s*(\d+)\s*\]/gi,
@@ -58,13 +136,20 @@ function normalizeFormula(raw) {
     }
   );
 
-  // Replace references like (low + close) / 2  — ok for mathjs
+  // Replace references like (low + close) / 2 – ok for mathjs
   // Remove TOS style function calls we don't support as-is (like SetDefaultColor)
   s = s.replace(/SetDefaultColor\([^)]*\)/gi, '');
   s = s.replace(/SetPaintingStrategy\([^)]*\)/gi, '');
   s = s.replace(/declare\s+[A-Za-z0-9_()\s]*/gi, '');
-
-  // Replace double pipes or long boolean operators not used; keep expression simple
+  
+  // Remove TOS-specific plot styling
+  s = s.replace(/\.SetPaintingStrategy\([^)]*\)/gi, '');
+  s = s.replace(/\.SetLineWeight\([^)]*\)/gi, '');
+  s = s.replace(/\.SetDefaultColor\([^)]*\)/gi, '');
+  
+  // Remove AddLabel statements
+  s = s.replace(/AddLabel\([^)]*\)/gi, '');
+  
   // Trim whitespace
   s = s.trim();
   return s;
@@ -101,7 +186,7 @@ function buildSeries(candles) {
 
   const getAt = (arr, idx) => (idx >= 0 && idx < arr.length ? arr[idx] : 0);
 
-  const ctxForIndex = (i) => {
+  const ctxForIndex = (i, defSeries = {}) => {
     return {
       open: series.open[i],
       high: series.high[i],
@@ -136,6 +221,62 @@ function buildSeries(candles) {
         }
         if (vals.length === 0) return 0;
         return vals.reduce((a,b) => a + b, 0) / vals.length;
+      },
+
+      // highest(seriesName or expression or defName, length) - lookback over series
+      highest: function(expr, length = 1) {
+        // Check if it's a def variable first
+        if (typeof expr === 'string' && defSeries[expr]) {
+          const arr = defSeries[expr];
+          const vals = [];
+          for (let k = 0; k < length; k++) {
+            const idx = i - k;
+            if (idx < 0) break;
+            vals.push(getAt(arr, idx));
+          }
+          return vals.length > 0 ? Math.max(...vals) : 0;
+        }
+        // If expr is a string (series name), get the array
+        if (typeof expr === 'string' && series[expr]) {
+          const arr = series[expr];
+          const vals = [];
+          for (let k = 0; k < length; k++) {
+            const idx = i - k;
+            if (idx < 0) break;
+            vals.push(getAt(arr, idx));
+          }
+          return vals.length > 0 ? Math.max(...vals) : 0;
+        }
+        // If expr is a number (already evaluated), can't do historical lookback
+        return typeof expr === 'number' ? expr : 0;
+      },
+
+      // lowest(seriesName or expression or defName, length) - lookback over series
+      lowest: function(expr, length = 1) {
+        // Check if it's a def variable first
+        if (typeof expr === 'string' && defSeries[expr]) {
+          const arr = defSeries[expr];
+          const vals = [];
+          for (let k = 0; k < length; k++) {
+            const idx = i - k;
+            if (idx < 0) break;
+            vals.push(getAt(arr, idx));
+          }
+          return vals.length > 0 ? Math.min(...vals) : 0;
+        }
+        // If expr is a string (series name), get the array
+        if (typeof expr === 'string' && series[expr]) {
+          const arr = series[expr];
+          const vals = [];
+          for (let k = 0; k < length; k++) {
+            const idx = i - k;
+            if (idx < 0) break;
+            vals.push(getAt(arr, idx));
+          }
+          return vals.length > 0 ? Math.min(...vals) : 0;
+        }
+        // If expr is a number, return as-is
+        return typeof expr === 'number' ? expr : 0;
       }
     };
   };
@@ -143,10 +284,108 @@ function buildSeries(candles) {
   return { ctxForIndex };
 }
 
+/**
+ * ✅ FIX #4: Build cached series for complex def expressions with dependency resolution
+ * This allows Highest(def_expr, n) to work properly
+ */
+function buildDefSeries(candles, defs) {
+  if (!defs || Object.keys(defs).length === 0) return {};
+  
+  const defValues = {};
+  const { ctxForIndex } = buildSeries(candles);
+  
+  // Sort defs by dependency order (simple: multiple passes)
+  const defNames = Object.keys(defs);
+  const evaluated = new Set();
+  
+  // Try to evaluate all defs, max 10 passes for dependency resolution
+  for (let pass = 0; pass < 10; pass++) {
+    let progress = false;
+    
+    for (const defName of defNames) {
+      if (evaluated.has(defName)) continue;
+      
+      const defExpr = defs[defName];
+      
+      // Check if this def depends on unevaluated defs
+      const dependencies = defNames.filter(d => 
+        d !== defName && 
+        !evaluated.has(d) && 
+        new RegExp(`\\b${d}\\b`).test(defExpr)
+      );
+      
+      if (dependencies.length > 0) continue; // Skip for now
+      
+      // Try to evaluate this def
+      const normalized = normalizeFormula(defExpr);
+      let compiled = null;
+      
+      try {
+        compiled = math.parse(normalized);
+      } catch (err) {
+        console.error(`Failed to compile def ${defName}:`, err.message);
+        evaluated.add(defName); // Mark as done to avoid infinite loop
+        continue;
+      }
+      
+      if (!compiled) {
+        evaluated.add(defName);
+        continue;
+      }
+      
+      // ✅ FIX #3: Evaluate at each candle with proper context
+      const values = candles.map((_, idx) => {
+        const ctx = ctxForIndex(idx, defValues);
+        const scope = {
+          ...ctx,
+          off: ctx.off,
+          sma: ctx.sma,
+          highest: ctx.highest,
+          lowest: ctx.lowest,
+          abs: Math.abs,
+          min: Math.min,
+          max: Math.max,
+          log: Math.log,
+          sqrt: Math.sqrt,
+          pow: Math.pow
+        };
+        
+        // ✅ FIX: Add already-evaluated defs to scope
+        Object.keys(defValues).forEach(d => {
+          scope[d] = defValues[d][idx] || 0;
+        });
+        
+        try {
+          const v = compiled.evaluate(scope);
+          return isFinite(Number(v)) ? Number(v) : 0;
+        } catch (err) {
+          console.error(`Def ${defName} eval error at idx ${idx}:`, err.message);
+          return 0;
+        }
+      });
+      
+      defValues[defName] = values;
+      evaluated.add(defName);
+      progress = true;
+    }
+    
+    if (!progress) break; // No more defs can be evaluated
+  }
+  
+  // Warn about unevaluated defs
+  const unevaluated = defNames.filter(d => !evaluated.has(d));
+  if (unevaluated.length > 0) {
+    console.warn('Could not evaluate defs (circular dependency?):', unevaluated);
+  }
+  
+  return defValues;
+}
+
 // ---------- Evaluate a set of formulas on one candle series ----------
 // formulas: array of formula strings (mathjs-compatible after normalization)
 // returns { labels: [...numbers|null], compiledCount }
-function evaluateFormulasOnCandles(candles, formulas = []) {
+function evaluateFormulasOnCandles(candles, formulas = [], defs = {}) {
+  const defSeries = buildDefSeries(candles || [], defs);
   const { ctxForIndex } = buildSeries(candles || []);
   const compiled = (Array.isArray(formulas) ? formulas : []).map(f => compileFormula(f));
   const lastIndex = (candles && candles.length) ? candles.length - 1 : -1;
@@ -156,21 +395,34 @@ function evaluateFormulasOnCandles(candles, formulas = []) {
     return { labels: compiled.map(() => null), compiledCount: compiled.length };
   }
 
-  const ctx = ctxForIndex(lastIndex);
+  const ctx = ctxForIndex(lastIndex, defSeries);
   const scope = {
     ...ctx,
     off: ctx.off,
     sma: ctx.sma,
+    highest: ctx.highest,
+    lowest: ctx.lowest,
     abs: Math.abs,
     min: Math.min,
     max: Math.max,
-    log: Math.log
+    log: Math.log,
+    sqrt: Math.sqrt,
+    pow: Math.pow
   };
+
+  // ✅ Add def values at last candle to scope
+  Object.keys(defSeries).forEach(defName => {
+    scope[defName] = defSeries[defName][lastIndex] || 0;
+  });
 
   const labels = compiled.map((node, i) => {
     if (!node) return null;
     try {
       const v = node.evaluate(scope);
+      
+      // ✅ FIX #6: Convert booleans to 0/1 for display
+      if (typeof v === 'boolean') return v ? 1 : 0;
+      
       const num = Number(v);
       return isFinite(num) ? num : null;
     } catch (err) {
@@ -201,8 +453,9 @@ function evaluateRows(rows = [], studyScriptsFlat = [], studyScriptsRaw = {}) {
       const key = `study${s}`;
       const script = studyScriptsRaw[key];
       if (!script) continue;
-      const plots = extractPlotExpressions(script).map(p => p.exprRaw);
-      for (const p of plots) {
+      const { plots } = extractPlotExpressions(script);
+      const plotExprs = plots.map(p => p.exprRaw);
+      for (const p of plotExprs) {
         formulas.push(p);
         if (formulas.length >= 25) break;
       }
@@ -217,7 +470,21 @@ function evaluateRows(rows = [], studyScriptsFlat = [], studyScriptsRaw = {}) {
   // Evaluate each row
   const out = rows.map((row) => {
     const candles = Array.isArray(row.candles) ? row.candles : (row.candlesRaw || []);
-    const { labels } = evaluateFormulasOnCandles(candles, formulas);
+    
+    // For evaluateRows, we need to collect all defs from all scripts
+    const allDefs = {};
+    if (studyScriptsRaw && typeof studyScriptsRaw === 'object') {
+      for (let s = 1; s <= 5; s++) {
+        const key = `study${s}`;
+        const script = studyScriptsRaw[key];
+        if (script) {
+          const { defs } = extractPlotExpressions(script);
+          Object.assign(allDefs, defs);
+        }
+      }
+    }
+    
+    const { labels } = evaluateFormulasOnCandles(candles, formulas, allDefs);
     // Build per-study fields study1..studyN where N = labels.length
     const result = { symbol: row.symbol, labels: labels.slice() };
     labels.forEach((v, idx) => {
