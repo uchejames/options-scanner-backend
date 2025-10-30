@@ -12,7 +12,12 @@ math.import({
  * ✅ ENHANCED: Extract plot expressions with better def/plot handling
  */
 function extractPlotExpressions(scriptText, inputs = {}) {
-  if (!scriptText || typeof scriptText !== 'string') return { plots: [], defs: {} };
+  console.log('🔍 extractPlotExpressions called with script length:', scriptText?.length);
+  
+  if (!scriptText || typeof scriptText !== 'string') {
+    console.warn('⚠️ No valid script text provided');
+    return { plots: [], defs: {} };
+  }
   
   const plots = [];
   const defs = {};
@@ -35,18 +40,21 @@ function extractPlotExpressions(scriptText, inputs = {}) {
     inputs[inputName] = inputs[inputName] || inputValue;
   }
   
+  console.log('📝 Extracted inputs:', inputs);
+  
   Object.keys(inputs).forEach(inputName => {
     const regex = new RegExp(`\\b${inputName}\\b`, 'g');
     cleaned = cleaned.replace(regex, inputs[inputName]);
   });
 
-  // ✅ FIX #1: Extract ALL defs first (including plots as defs)
-  // This allows plots to reference other plots
+  // ✅ FIX #1: Extract ALL defs first
   const defRegex = /def\s+([A-Za-z0-9_]+)\s*=\s*([^;]+);/gi;
   let defMatch;
   while ((defMatch = defRegex.exec(cleaned)) !== null) {
     defs[defMatch[1]] = defMatch[2].trim();
   }
+
+  console.log('📊 Extracted defs:', Object.keys(defs));
 
   // ✅ FIX #2: Extract plots and treat them as defs too
   const plotRegex = /plot\s+([A-Za-z0-9_]+)\s*=\s*([^;]+);/gi;
@@ -59,6 +67,9 @@ function extractPlotExpressions(scriptText, inputs = {}) {
     defs[name] = exprRaw;
     plots.push({ name, exprRaw });
   }
+
+  console.log('📈 Extracted plots:', plots.map(p => p.name));
+  console.log('✅ Total defs (including plots):', Object.keys(defs).length);
 
   return { plots, defs };
 }
@@ -110,7 +121,7 @@ function compileFormula(str) {
   try {
     return math.parse(normalized);
   } catch (err) {
-    console.error('Formula compile error:', err.message, 'for:', str);
+    console.error('❌ Formula compile error:', err.message, 'for:', str);
     return null;
   }
 }
@@ -237,9 +248,10 @@ function buildSeries(candles) {
 
 /**
  * ✅ CRITICAL FIX: Build def series with proper dependency resolution
- * This is the key fix for your script - allows plots to reference other plots
  */
 function buildDefSeries(candles, defs) {
+  console.log('🏗️ buildDefSeries called with', Object.keys(defs).length, 'defs and', candles.length, 'candles');
+  
   if (!defs || Object.keys(defs).length === 0) return {};
   
   const defValues = {};
@@ -248,13 +260,13 @@ function buildDefSeries(candles, defs) {
   // Track evaluation order
   const defNames = Object.keys(defs);
   const evaluated = new Set();
-  const evaluating = new Set(); // Track circular deps
+  const evaluating = new Set();
   
   // Recursive evaluation with dependency resolution
   const evaluateDef = (defName) => {
     if (evaluated.has(defName)) return true;
     if (evaluating.has(defName)) {
-      console.warn(`Circular dependency detected: ${defName}`);
+      console.warn(`⚠️ Circular dependency detected: ${defName}`);
       return false;
     }
     
@@ -267,21 +279,27 @@ function buildDefSeries(candles, defs) {
       new RegExp(`\\b${d}\\b`).test(defExpr)
     );
     
+    if (dependencies.length > 0) {
+      console.log(`📦 ${defName} depends on:`, dependencies);
+    }
+    
     // Evaluate dependencies first
     for (const dep of dependencies) {
       if (!evaluateDef(dep)) {
-        console.warn(`Failed to evaluate dependency ${dep} for ${defName}`);
+        console.warn(`❌ Failed to evaluate dependency ${dep} for ${defName}`);
       }
     }
     
     // Now evaluate this def
     const normalized = normalizeFormula(defExpr);
+    console.log(`🔄 Evaluating ${defName}: ${defExpr.substring(0, 50)}...`);
+    
     let compiled = null;
     
     try {
       compiled = math.parse(normalized);
     } catch (err) {
-      console.error(`Failed to compile def ${defName}:`, err.message);
+      console.error(`❌ Failed to compile def ${defName}:`, err.message);
       evaluating.delete(defName);
       evaluated.add(defName);
       return false;
@@ -319,13 +337,15 @@ function buildDefSeries(candles, defs) {
         const v = compiled.evaluate(scope);
         return isFinite(Number(v)) ? Number(v) : 0;
       } catch (err) {
-        // Don't spam console for every candle
         if (idx === 0) {
-          console.error(`Def ${defName} eval error:`, err.message);
+          console.error(`❌ Def ${defName} eval error:`, err.message);
         }
         return 0;
       }
     });
+    
+    const lastValue = values[values.length - 1];
+    console.log(`✅ ${defName} evaluated. Last value: ${lastValue}`);
     
     defValues[defName] = values;
     evaluating.delete(defName);
@@ -340,8 +360,10 @@ function buildDefSeries(candles, defs) {
   
   const unevaluated = defNames.filter(d => !evaluated.has(d));
   if (unevaluated.length > 0) {
-    console.warn('Could not evaluate defs:', unevaluated);
+    console.warn('⚠️ Could not evaluate defs:', unevaluated);
   }
+  
+  console.log('✅ buildDefSeries complete. Evaluated:', evaluated.size, 'of', defNames.length);
   
   return defValues;
 }
@@ -350,7 +372,10 @@ function buildDefSeries(candles, defs) {
  * ✅ ENHANCED: Evaluate formulas on candles with full def support
  */
 function evaluateFormulasOnCandles(candles, formulas = [], defs = {}) {
+  console.log('🎯 evaluateFormulasOnCandles:', candles.length, 'candles,', formulas.length, 'formulas,', Object.keys(defs).length, 'defs');
+  
   if (!candles || candles.length === 0) {
+    console.warn('⚠️ No candles provided');
     return { labels: (formulas || []).map(() => null), compiledCount: 0 };
   }
 
@@ -380,7 +405,10 @@ function evaluateFormulasOnCandles(candles, formulas = [], defs = {}) {
   });
 
   const labels = compiled.map((node, i) => {
-    if (!node) return null;
+    if (!node) {
+      console.warn(`⚠️ Formula ${i} failed to compile`);
+      return null;
+    }
     try {
       const v = node.evaluate(scope);
       
@@ -388,12 +416,15 @@ function evaluateFormulasOnCandles(candles, formulas = [], defs = {}) {
       if (typeof v === 'boolean') return v ? 1 : 0;
       
       const num = Number(v);
+      console.log(`📊 Formula ${i} result:`, num);
       return isFinite(num) ? num : null;
     } catch (err) {
-      console.error(`Eval error formula idx ${i}:`, err.message);
+      console.error(`❌ Eval error formula idx ${i}:`, err.message);
       return null;
     }
   });
+
+  console.log('✅ Final labels:', labels);
 
   return { labels, compiledCount: compiled.length };
 }
