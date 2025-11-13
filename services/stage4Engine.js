@@ -1,5 +1,5 @@
 // backend/services/stage4Engine.js
-// BULLETPROOF TOS Formula Engine - Handles Everything
+// BULLETPROOF TOS Formula Engine - Handles Everything (FIXED)
 const { create, all } = require('mathjs');
 const math = create(all);
 
@@ -84,6 +84,7 @@ function normalizeFormula(raw, allDefs = {}) {
   let s = raw;
 
   // TOS function name normalization (case-insensitive)
+  // Mark these specially so we can handle them later
   s = s.replace(/SimpleMovingAvg\s*\(/gi, '_sma_(');
   s = s.replace(/simplemovingavg\s*\(/gi, '_sma_(');
   s = s.replace(/Average\s*\(/gi, '_sma_(');
@@ -120,31 +121,6 @@ function normalizeFormula(raw, allDefs = {}) {
     });
   }
 
-  // Now handle function calls - they'll have series names or expressions inside
-  // Pattern: _sma_(expression, length[, offset])
-  
-  // Convert series name references to quoted strings for our custom functions
-  s = s.replace(/_sma_\(\s*([a-z]+)\s*,/gi, (match, name) => {
-    if (['open', 'high', 'low', 'close', 'volume', 'oi', 'delta', 'gamma', 'theo', 'mark', 'ask', 'bid'].includes(name.toLowerCase())) {
-      return `_sma_("${name.toLowerCase()}", `;
-    }
-    return match;
-  });
-
-  s = s.replace(/_highest_\(\s*([a-z]+)\s*,/gi, (match, name) => {
-    if (['open', 'high', 'low', 'close', 'volume', 'oi', 'delta', 'gamma', 'theo', 'mark', 'ask', 'bid'].includes(name.toLowerCase())) {
-      return `_highest_("${name.toLowerCase()}", `;
-    }
-    return match;
-  });
-
-  s = s.replace(/_lowest_\(\s*([a-z]+)\s*,/gi, (match, name) => {
-    if (['open', 'high', 'low', 'close', 'volume', 'oi', 'delta', 'gamma', 'theo', 'mark', 'ask', 'bid'].includes(name.toLowerCase())) {
-      return `_lowest_("${name.toLowerCase()}", `;
-    }
-    return match;
-  });
-
   // Remove TOS styling commands
   s = s.replace(/\.SetDefaultColor\([^)]*\)/gi, '');
   s = s.replace(/\.SetPaintingStrategy\([^)]*\)/gi, '');
@@ -166,18 +142,41 @@ function normalizeFormula(raw, allDefs = {}) {
 }
 
 /**
- * Compile formula string to mathjs AST
+ * Check if expression contains aggregation functions
  */
-function compileFormula(str, allDefs = {}) {
-  const normalized = normalizeFormula(str, allDefs);
-  if (!normalized) return null;
+function containsAggregation(expr) {
+  return /_sma_|_highest_|_lowest_/.test(expr);
+}
+
+/**
+ * Parse aggregation function calls
+ */
+function parseAggregationCall(expr) {
+  const match = expr.match(/^(_sma_|_highest_|_lowest_)\((.*)\)$/);
+  if (!match) return null;
   
-  try {
-    return math.parse(normalized);
-  } catch (err) {
-    console.error('❌ Compile error:', err.message, '\nFormula:', str, '\nNormalized:', normalized);
-    return null;
+  const funcName = match[1];
+  const argsStr = match[2];
+  
+  // Parse arguments (simple approach - won't handle nested parens perfectly)
+  const args = [];
+  let depth = 0;
+  let current = '';
+  
+  for (let i = 0; i < argsStr.length; i++) {
+    const char = argsStr[i];
+    if (char === '(' || char === '[') depth++;
+    else if (char === ')' || char === ']') depth--;
+    else if (char === ',' && depth === 0) {
+      args.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
   }
+  if (current) args.push(current.trim());
+  
+  return { funcName, args };
 }
 
 /**
@@ -210,139 +209,152 @@ function buildSeries(candles) {
 }
 
 /**
- * Create evaluation context for a specific candle index
+ * Evaluate expression across all candles to create a time series
  */
-function createContext(candles, candleIndex, defValues = {}) {
+function evaluateExpressionSeries(expr, candles, defSeries = {}) {
   const { series, getAt } = buildSeries(candles);
-  const i = candleIndex;
+  const values = [];
+  
+  for (let i = 0; i < candles.length; i++) {
+    const ctx = {
+      // Direct series access
+      open: getAt(series.open, i),
+      high: getAt(series.high, i),
+      low: getAt(series.low, i),
+      close: getAt(series.close, i),
+      volume: getAt(series.volume, i),
+      oi: getAt(series.oi, i),
+      delta: getAt(series.delta, i),
+      gamma: getAt(series.gamma, i),
+      theo: getAt(series.theo, i),
+      mark: getAt(series.mark, i),
+      ask: getAt(series.ask, i),
+      bid: getAt(series.bid, i),
 
-  return {
-    // Direct series access
-    open: getAt(series.open, i),
-    high: getAt(series.high, i),
-    low: getAt(series.low, i),
-    close: getAt(series.close, i),
-    volume: getAt(series.volume, i),
-    oi: getAt(series.oi, i),
-    delta: getAt(series.delta, i),
-    gamma: getAt(series.gamma, i),
-    theo: getAt(series.theo, i),
-    mark: getAt(series.mark, i),
-    ask: getAt(series.ask, i),
-    bid: getAt(series.bid, i),
-
-    // Offset accessor
-    _off_: function(seriesName, offset = 0) {
-      const arr = series[seriesName];
-      if (!arr) return 0;
-      return getAt(arr, i - Number(offset));
-    },
-
-    // Simple Moving Average
-    _sma_: function(input, length = 1, offset = 0) {
-      length = Number(length);
-      offset = Number(offset);
-      
-      let arr;
-      
-      // If input is a string (series name), get the series
-      if (typeof input === 'string') {
-        arr = series[input];
+      // Offset accessor
+      _off_: function(seriesName, offset = 0) {
+        const arr = series[seriesName];
         if (!arr) return 0;
-      }
-      // If input is a number (already evaluated expression), create array of repeated value
-      else if (typeof input === 'number') {
-        // This means we're calling SMA on a scalar - just return the scalar
-        return input;
-      }
-      // If input is an array (def values), use it directly
-      else if (Array.isArray(input)) {
-        arr = input;
-      }
-      else {
-        return 0;
-      }
-      
-      const vals = [];
+        return getAt(arr, i - Number(offset));
+      },
+
+      // Math functions
+      abs: Math.abs,
+      min: Math.min,
+      max: Math.max,
+      log: Math.log,
+      sqrt: Math.sqrt,
+      pow: Math.pow,
+      floor: Math.floor,
+      ceil: Math.ceil,
+      round: Math.round
+    };
+    
+    // Add def series values
+    Object.keys(defSeries).forEach(defName => {
+      ctx[defName] = getAt(defSeries[defName], i);
+    });
+    
+    try {
+      const parsed = math.parse(expr);
+      const result = parsed.evaluate(ctx);
+      const num = Number(result);
+      values.push(isFinite(num) ? num : 0);
+    } catch (err) {
+      console.error(`Error evaluating expression at candle ${i}:`, err.message);
+      values.push(0);
+    }
+  }
+  
+  return values;
+}
+
+/**
+ * Apply aggregation function to a time series
+ */
+function applyAggregation(funcName, inputSeries, length, candles) {
+  const result = [];
+  
+  for (let i = 0; i < candles.length; i++) {
+    const vals = [];
+    
+    if (funcName === '_sma_') {
+      // Simple Moving Average
       for (let k = 0; k < length; k++) {
-        const idx = i - offset - k;
-        vals.push(getAt(arr, idx));
+        const idx = i - k;
+        if (idx >= 0 && idx < inputSeries.length) {
+          vals.push(inputSeries[idx]);
+        }
       }
-      
-      if (vals.length === 0) return 0;
       const sum = vals.reduce((a, b) => a + b, 0);
-      return sum / vals.length;
-    },
-
-    // Highest value over lookback period
-    _highest_: function(input, length = 1) {
-      length = Number(length);
+      result.push(vals.length > 0 ? sum / vals.length : 0);
       
-      let arr;
-      
-      if (typeof input === 'string') {
-        arr = series[input];
-        if (!arr) return 0;
-      }
-      else if (typeof input === 'number') {
-        return input;
-      }
-      else if (Array.isArray(input)) {
-        arr = input;
-      }
-      else {
-        return 0;
-      }
-      
-      const vals = [];
+    } else if (funcName === '_highest_') {
+      // Highest value
       for (let k = 0; k < length; k++) {
         const idx = i - k;
-        vals.push(getAt(arr, idx));
+        if (idx >= 0 && idx < inputSeries.length) {
+          vals.push(inputSeries[idx]);
+        }
       }
+      result.push(vals.length > 0 ? Math.max(...vals) : 0);
       
-      return vals.length > 0 ? Math.max(...vals) : 0;
-    },
-
-    // Lowest value over lookback period
-    _lowest_: function(input, length = 1) {
-      length = Number(length);
-      
-      let arr;
-      
-      if (typeof input === 'string') {
-        arr = series[input];
-        if (!arr) return 0;
-      }
-      else if (typeof input === 'number') {
-        return input;
-      }
-      else if (Array.isArray(input)) {
-        arr = input;
-      }
-      else {
-        return 0;
-      }
-      
-      const vals = [];
+    } else if (funcName === '_lowest_') {
+      // Lowest value
       for (let k = 0; k < length; k++) {
         const idx = i - k;
-        vals.push(getAt(arr, idx));
+        if (idx >= 0 && idx < inputSeries.length) {
+          vals.push(inputSeries[idx]);
+        }
       }
-      
-      return vals.length > 0 ? Math.min(...vals) : 0;
-    },
+      result.push(vals.length > 0 ? Math.min(...vals) : 0);
+    }
+  }
+  
+  return result;
+}
 
-    // Math functions
-    abs: Math.abs,
-    min: Math.min,
-    max: Math.max,
-    log: Math.log,
-    sqrt: Math.sqrt,
-    pow: Math.pow,
-    floor: Math.floor,
-    ceil: Math.ceil,
-    round: Math.round
-  };
+/**
+ * Evaluate formula that may contain aggregations
+ */
+function evaluateFormulaWithAggregations(formula, candles, allDefs = {}, defSeries = {}) {
+  const normalized = normalizeFormula(formula, allDefs);
+  
+  // Check if this is a simple aggregation call
+  const aggCall = parseAggregationCall(normalized);
+  
+  if (aggCall && aggCall.args.length >= 2) {
+    const { funcName, args } = aggCall;
+    const inputExpr = args[0];
+    const lengthExpr = args[1];
+    
+    // Check if input is a simple series name
+    const seriesNames = ['open', 'high', 'low', 'close', 'volume', 'oi', 'delta', 'gamma', 'theo', 'mark', 'ask', 'bid'];
+    const isSimpleSeries = seriesNames.includes(inputExpr.toLowerCase());
+    
+    // Evaluate length parameter
+    const { series } = buildSeries(candles);
+    const lengthCtx = {
+      abs: Math.abs, min: Math.min, max: Math.max,
+      log: Math.log, sqrt: Math.sqrt, pow: Math.pow
+    };
+    const lengthValue = Number(math.evaluate(lengthExpr, lengthCtx));
+    
+    let inputSeries;
+    if (isSimpleSeries) {
+      // Use the series directly
+      inputSeries = series[inputExpr.toLowerCase()];
+    } else {
+      // Evaluate the expression across all candles first
+      inputSeries = evaluateExpressionSeries(inputExpr, candles, defSeries);
+    }
+    
+    // Apply aggregation function
+    return applyAggregation(funcName, inputSeries, lengthValue, candles);
+  }
+  
+  // If not an aggregation, evaluate normally
+  return evaluateExpressionSeries(normalized, candles, defSeries);
 }
 
 /**
@@ -379,46 +391,15 @@ function buildDefSeries(candles, defs) {
         continue; // Skip this def for now, dependencies not ready
       }
       
-      // Build time series by evaluating at each candle
-      const values = [];
-      let failed = false;
-      
-      for (let idx = 0; idx < candles.length; idx++) {
-        const ctx = createContext(candles, idx, defSeries);
-        
-        // Add already-evaluated defs to context
-        Object.keys(defSeries).forEach(evaledDef => {
-          ctx[evaledDef] = defSeries[evaledDef][idx] || 0;
-          
-          // Also provide as array for SMA/Highest/Lowest functions
-          if (defSeries[evaledDef]) {
-            ctx[`${evaledDef}_array`] = defSeries[evaledDef];
-          }
-        });
-        
-        // Compile and evaluate
-        const compiled = compileFormula(defExpr, defs);
-        if (!compiled) {
-          console.error(`❌ Failed to compile def ${defName}`);
-          failed = true;
-          break;
-        }
-        
-        try {
-          const result = compiled.evaluate(ctx);
-          const num = Number(result);
-          values.push(isFinite(num) ? num : 0);
-        } catch (err) {
-          console.error(`❌ Error evaluating def ${defName} at candle ${idx}:`, err.message);
-          values.push(0);
-        }
-      }
-      
-      if (!failed) {
+      try {
+        // Evaluate this def across all candles
+        const values = evaluateFormulaWithAggregations(defExpr, candles, defs, defSeries);
         defSeries[defName] = values;
         evaluated.add(defName);
         progress = true;
-        console.log(`✅ Evaluated def: ${defName} (${values.length} values, sample: ${values[values.length - 1]?.toExponential(4)})`);
+        console.log(`✅ Evaluated def: ${defName} (${values.length} values, last: ${values[values.length - 1]?.toFixed(6)})`);
+      } catch (err) {
+        console.error(`❌ Error evaluating def ${defName}:`, err.message);
       }
     }
     
@@ -447,38 +428,26 @@ function evaluateFormulasOnCandles(candles, formulas = [], defs = {}) {
   // Build def time series first
   const defSeries = buildDefSeries(candles, defs);
   
-  // Evaluate each plot formula at the last candle
-  const lastIndex = candles.length - 1;
-  const ctx = createContext(candles, lastIndex, defSeries);
-  
-  // Add def series values at last candle to context
-  Object.keys(defSeries).forEach(defName => {
-    ctx[defName] = defSeries[defName][lastIndex] || 0;
-    ctx[`${defName}_array`] = defSeries[defName]; // For SMA/Highest/Lowest
-  });
-
+  // Evaluate each plot formula
   const labels = formulas.map((formulaStr, idx) => {
-    const compiled = compileFormula(formulaStr, defs);
-    if (!compiled) {
-      console.error(`❌ Formula ${idx + 1} failed to compile`);
-      return null;
-    }
-    
     try {
-      const result = compiled.evaluate(ctx);
+      console.log(`\n📊 Evaluating formula ${idx + 1}: ${formulaStr}`);
+      const resultSeries = evaluateFormulaWithAggregations(formulaStr, candles, defs, defSeries);
       
-      // Handle booleans
-      if (typeof result === 'boolean') {
-        return result ? 1 : 0;
+      // Return the last value
+      const lastValue = resultSeries[resultSeries.length - 1];
+      
+      if (typeof lastValue === 'boolean') {
+        return lastValue ? 1 : 0;
       }
       
-      const num = Number(result);
+      const num = Number(lastValue);
       if (isFinite(num)) {
         console.log(`✅ Formula ${idx + 1} result: ${num.toExponential(4)}`);
         return num;
       }
       
-      console.warn(`⚠️  Formula ${idx + 1} returned non-finite: ${result}`);
+      console.warn(`⚠️  Formula ${idx + 1} returned non-finite: ${lastValue}`);
       return null;
     } catch (err) {
       console.error(`❌ Error evaluating formula ${idx + 1}:`, err.message);
@@ -555,7 +524,6 @@ function evaluateRows(rows = [], studyScriptsFlat = [], studyScriptsRaw = {}) {
 module.exports = {
   extractPlotExpressions,
   normalizeFormula,
-  compileFormula,
   evaluateFormulasOnCandles,
   evaluateRows
 };
