@@ -513,11 +513,13 @@ function evaluateFormulasOnCandles(candles, formulas = [], defs = {}) {
   // Build def time series first
   const defSeries = buildDefSeries(candles, defs);
   
-  // Evaluate each plot formula
+  // Evaluate each plot formula with a FRESH cache for this ticker
   const labels = formulas.map((formulaStr, idx) => {
     try {
       console.log(`\n📊 Evaluating formula ${idx + 1}: ${formulaStr}`);
-      const resultSeries = evaluateFormulaRecursive(formulaStr, candles, defs, defSeries);
+      // CRITICAL: Create a new cache for each formula evaluation to ensure ticker-specific results
+      const freshCache = new Map();
+      const resultSeries = evaluateFormulaRecursive(formulaStr, candles, defs, defSeries, freshCache);
       
       // Return the last value
       const lastValue = resultSeries[resultSeries.length - 1];
