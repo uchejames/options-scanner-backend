@@ -345,13 +345,27 @@ function applyAggregation(funcName, inputSeries, length, candles) {
  * This handles cases like: SimpleMovingAvg(SimpleMovingAvg(close, 5), 10)
  */
 function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, cache = new Map()) {
-  // Check cache first
-  if (cache.has(expr)) {
-    return cache.get(expr);
+  // Normalize the expression first
+  const normalized = normalizeFormula(expr, allDefs);
+  
+  // Use normalized expression as cache key for accuracy
+  if (cache.has(normalized)) {
+    return cache.get(normalized);
   }
   
-  // Normalize the expression
-  const normalized = normalizeFormula(expr, allDefs);
+  // Check if this is a simple series name (e.g., just "close" or "high")
+  const seriesNames = ['open', 'high', 'low', 'close', 'volume', 'oi', 'delta', 'gamma', 'theo', 'mark', 'ask', 'bid'];
+  if (seriesNames.includes(normalized.toLowerCase())) {
+    const { series } = buildSeries(candles);
+    const result = series[normalized.toLowerCase()];
+    cache.set(normalized, result);
+    return result;
+  }
+  
+  // Check if this is a def variable
+  if (defSeries[normalized]) {
+    return defSeries[normalized];
+  }
   
   // Find all aggregation calls in this expression
   const aggCalls = findAggregationCalls(normalized);
@@ -359,7 +373,7 @@ function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, c
   if (aggCalls.length === 0) {
     // No aggregations - evaluate as simple expression
     const result = evaluateSimpleExpression(normalized, candles, defSeries);
-    cache.set(expr, result);
+    cache.set(normalized, result);
     return result;
   }
   
@@ -391,11 +405,15 @@ function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, c
     try {
       const lengthCtx = {
         abs: Math.abs, min: Math.min, max: Math.max,
-        log: Math.log, sqrt: Math.sqrt, pow: Math.pow
+        log: Math.log, sqrt: Math.sqrt, pow: Math.pow,
+        floor: Math.floor, ceil: Math.ceil, round: Math.round
       };
       length = Number(math.evaluate(lengthExpr, lengthCtx));
+      if (!isFinite(length) || length < 1) {
+        length = 20;
+      }
     } catch (err) {
-      console.error(`Error evaluating length parameter: ${lengthExpr}`);
+      console.error(`Error evaluating length parameter: ${lengthExpr}`, err.message);
     }
     
     // Recursively evaluate the input expression (handles nested aggregations)
@@ -435,7 +453,7 @@ function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, c
     return candles.map(() => 0);
   }
   
-  cache.set(expr, values);
+  cache.set(normalized, values);
   return values;
 }
 
@@ -474,8 +492,10 @@ function buildDefSeries(candles, defs) {
       }
       
       try {
+        // CRITICAL: Create a fresh cache for each def evaluation
+        const defCache = new Map();
         // Evaluate this def across all candles using recursive evaluator
-        const values = evaluateFormulaRecursive(defExpr, candles, defs, defSeries);
+        const values = evaluateFormulaRecursive(defExpr, candles, defs, defSeries, defCache);
         defSeries[defName] = values;
         evaluated.add(defName);
         progress = true;
