@@ -46,8 +46,54 @@ const getLabelsForUnderlying = async (req, res) => {
 };
 
 /**
+ * Extract underlying symbol from option symbol
+ */
+function extractUnderlying(row) {
+  try {
+    // Try sourceSymbol first (most reliable)
+    if (row.sourceSymbol && typeof row.sourceSymbol === 'string') {
+      return row.sourceSymbol.toUpperCase().trim();
+    }
+    
+    // Try underlying field
+    if (row.underlying && typeof row.underlying === 'string') {
+      return row.underlying.toUpperCase().trim();
+    }
+    
+    // Try baseSymbol
+    if (row.baseSymbol && typeof row.baseSymbol === 'string') {
+      return row.baseSymbol.toUpperCase().trim();
+    }
+    
+    // Extract from option symbol if it starts with .
+    const sym = row.symbol;
+    if (sym && typeof sym === 'string' && sym.startsWith('.')) {
+      // Format: .AAPL251114C110 -> AAPL
+      const match = sym.slice(1).match(/^([A-Z]+)/);
+      if (match) {
+        return match[1].toUpperCase();
+      }
+    }
+    
+    // If option symbol doesn't start with ., it might be OCC format
+    // AAPL251114C00110000 -> AAPL
+    if (sym && typeof sym === 'string') {
+      const match = sym.match(/^([A-Z]+)/);
+      if (match) {
+        return match[1].toUpperCase();
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    console.error('Error extracting underlying:', error);
+    return null;
+  }
+}
+
+/**
  * MAIN: Stage 4 Scan
- * ✅ FIXED: Fetches intraday data for option symbols, then evaluates for each option
+ * ✅ FIXED: Fetches intraday data for underlying symbols, then evaluates for each option
  */
 const scanStage3Rows = async (req, res) => {
   try {
@@ -63,49 +109,51 @@ const scanStage3Rows = async (req, res) => {
       return res.status(400).json({ success: false, error: 'rows required' });
     }
 
-    // 🔹 Extract unique OPTION symbols
-    const symbolMap = new Map(); // symbol -> [rows]
+    // 🔹 Extract unique UNDERLYING symbols from options
+    const underlyingMap = new Map(); // underlying -> [rows]
+    
     for (const row of rows) {
-      const optionSymbol = row.symbol?.toUpperCase().trim();
-      if (!optionSymbol) {
-        console.warn(`⚠️ Row missing symbol:`, row);
+      const underlying = extractUnderlying(row);
+      if (!underlying) {
+        console.warn(`⚠️ Could not extract underlying for row:`, row.symbol);
         continue;
       }
-      if (!symbolMap.has(optionSymbol)) {
-        symbolMap.set(optionSymbol, []);
+      
+      if (!underlyingMap.has(underlying)) {
+        underlyingMap.set(underlying, []);
       }
-      symbolMap.get(optionSymbol).push(row);
+      underlyingMap.get(underlying).push(row);
     }
-
-    const optionSymbols = Array.from(symbolMap.keys());
-
-    if (optionSymbols.length === 0) {
+    
+    const underlyingSymbols = Array.from(underlyingMap.keys());
+    
+    if (underlyingSymbols.length === 0) {
       return res.status(400).json({ 
         success: false, 
-        error: 'No valid option symbols found.' 
+        error: 'No valid underlying symbols found. Check that options have sourceSymbol or valid symbol format.' 
       });
     }
 
-    console.log(`📊 Grouped ${rows.length} options into ${optionSymbols.length} unique symbols`);
+    console.log(`📊 Grouped ${rows.length} options into ${underlyingSymbols.length} underlyings:`, underlyingSymbols);
 
-    // 🔹 Fetch intraday data for ALL option symbols
+    // 🔹 Fetch intraday data for ALL underlying symbols
     console.log(`📡 Fetching intraday data (${interval}m interval)...`);
-    const multi = await getMultipleIntradayData(optionSymbols, interval);
-
-    // Store candles by option symbol
-    const candlesBySymbol = {};
-
+    const multi = await getMultipleIntradayData(underlyingSymbols, interval);
+    
+    // Store candles by underlying symbol
+    const candlesByUnderlying = {};
+    
     for (const item of multi) {
-      const optionSymbol = item.symbol.toUpperCase();
+      const underlying = item.symbol.toUpperCase();
       
       if (item.error) {
-        console.error(`❌ Failed to fetch intraday data for ${optionSymbol}:`, item.error);
+        console.error(`❌ Failed to fetch intraday data for ${underlying}:`, item.error);
         continue;
       }
 
       const rawData = item.data;
       if (!rawData || !rawData.candles) {
-        console.error(`❌ No candles in response for ${optionSymbol}`);
+        console.error(`❌ No candles in response for ${underlying}`);
         continue;
       }
 
@@ -123,17 +171,17 @@ const scanStage3Rows = async (req, res) => {
       }));
 
       if (candles.length > 0) {
-        candlesBySymbol[optionSymbol] = candles;
-        console.log(`✅ Loaded ${candles.length} candles for ${optionSymbol}`);
+        candlesByUnderlying[underlying] = candles;
+        console.log(`✅ Loaded ${candles.length} candles for ${underlying}`);
       } else {
-        console.warn(`⚠️ Empty candles array for ${optionSymbol}`);
+        console.warn(`⚠️ Empty candles array for ${underlying}`);
       }
     }
 
-    if (Object.keys(candlesBySymbol).length === 0) {
+    if (Object.keys(candlesByUnderlying).length === 0) {
       return res.status(500).json({
         success: false,
-        error: 'Failed to fetch intraday data for any option symbols. Check Schwab API connection.'
+        error: 'Failed to fetch intraday data for any underlying symbols. Check Schwab API connection.'
       });
     }
 
@@ -150,11 +198,12 @@ const scanStage3Rows = async (req, res) => {
         continue;
       }
 
-      const candles = candlesBySymbol[optionSymbol];
+      // Extract underlying symbol from option
+      const underlying = extractUnderlying(row);
       
-      if (!candles || candles.length === 0) {
-        console.warn(`⚠️ No candles available for ${optionSymbol}`);
-        errors.push({ symbol: optionSymbol, error: 'No intraday data available' });
+      if (!underlying) {
+        console.warn(`⚠️ Could not extract underlying for ${optionSymbol}`);
+        errors.push({ symbol: optionSymbol, error: 'Could not extract underlying symbol' });
         
         // Still add the row but with null study values
         const emptyLabels = {};
@@ -165,7 +214,22 @@ const scanStage3Rows = async (req, res) => {
         continue;
       }
 
-      console.log(`\n🎯 Processing ${optionSymbol}: ${candles.length} candles`);
+      const candles = candlesByUnderlying[underlying];
+      
+      if (!candles || candles.length === 0) {
+        console.warn(`⚠️ No candles available for ${optionSymbol} (underlying: ${underlying})`);
+        errors.push({ symbol: optionSymbol, underlying, error: 'No intraday data available' });
+        
+        // Still add the row but with null study values
+        const emptyLabels = {};
+        for (let i = 1; i <= 25; i++) {
+          emptyLabels[`study${i}`] = null;
+        }
+        resultRows.push({ ...row, ...emptyLabels, underlying });
+        continue;
+      }
+
+      console.log(`\n🎯 Processing ${optionSymbol} (underlying: ${underlying}): ${candles.length} candles`);
 
       // 🔹 Evaluate all 5 studies for THIS specific option
       const studyLabels = {};
@@ -200,7 +264,7 @@ const scanStage3Rows = async (req, res) => {
             continue;
           }
 
-          // ✅ CRITICAL: Evaluate formulas for THIS OPTION'S candles
+          // ✅ CRITICAL: Evaluate formulas for THIS UNDERLYING'S candles
           const { labels } = evaluateFormulasOnCandles(candles, plotFormulas, defs);
 
           console.log(`  📊 Study ${i} for ${optionSymbol}:`, labels.slice(0, 5).map(v => 
@@ -263,6 +327,7 @@ const scanStage3Rows = async (req, res) => {
         ...row, 
         ...flattenedLabels, // study1, study2, ..., study25
         studyLabels, // Also keep nested structure for debugging
+        underlying // Store which underlying was used
       });
     }
 
@@ -279,7 +344,7 @@ const scanStage3Rows = async (req, res) => {
       meta: {
         totalRows: rows.length,
         processedRows: resultRows.length,
-        symbolsScanned: Object.keys(candlesBySymbol).length,
+        underlyingsScanned: Object.keys(candlesByUnderlying).length,
         errorCount: errors.length
       }
     });
