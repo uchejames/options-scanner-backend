@@ -47,10 +47,7 @@ const getLabelsForUnderlying = async (req, res) => {
 
 /**
  * MAIN: Stage 4 Scan
- * Accepts Stage 3 rows (each row representing an option)
- * Runs all 5 study formulas against each underlying's intraday data
- * 
- * ✅ FIXED: Now evaluates formulas separately for each option's data
+ * ✅ FIXED: Now fetches and evaluates intraday data for EACH OPTION symbol individually
  */
 const scanStage3Rows = async (req, res) => {
   try {
@@ -66,39 +63,26 @@ const scanStage3Rows = async (req, res) => {
       return res.status(400).json({ success: false, error: 'rows required' });
     }
 
-    // 📹 Group rows by underlying symbol
-    const byUnderlying = {};
-    rows.forEach(r => {
-      // Extract underlying symbol from option symbol
-      const u =
-        r.sourceSymbol ||
-        r.underlying ||
-        r.symbol?.slice(0, r.symbol.length - 15) ||
-        r.ticker ||
-        r.baseSymbol;
-      const key = (u || 'UNKNOWN').toUpperCase();
-      if (!byUnderlying[key]) byUnderlying[key] = [];
-      byUnderlying[key].push(r);
-    });
-
-    const underlyings = Object.keys(byUnderlying);
-    if (underlyings.length === 0) {
-      return res.status(400).json({ success: false, error: 'No valid underlyings found' });
+    // 🔹 Extract all unique OPTION symbols (not underlyings)
+    const optionSymbols = [...new Set(rows.map(r => r.symbol).filter(Boolean))];
+    
+    if (optionSymbols.length === 0) {
+      return res.status(400).json({ success: false, error: 'No valid option symbols found' });
     }
 
-    console.log('📊 Grouped by underlyings:', underlyings);
+    console.log(`📊 Fetching intraday data for ${optionSymbols.length} option symbols`);
 
-    // 📹 Fetch intraday data for all underlyings
-    const multi = await getMultipleIntradayData(underlyings, interval);
+    // 🔹 Fetch intraday data for ALL option symbols
+    const multi = await getMultipleIntradayData(optionSymbols, interval);
     
-    // Store candles by underlying for reuse
-    const candlesByUnderlying = {};
+    // Store candles by option symbol
+    const candlesBySymbol = {};
     
     for (const item of multi) {
-      const u = item.symbol.toUpperCase();
+      const sym = item.symbol.toUpperCase();
       
       if (item.error) {
-        console.error(`❌ Failed to fetch intraday data for ${u}:`, item.error);
+        console.error(`❌ Failed to fetch intraday data for ${sym}:`, item.error);
         continue;
       }
 
@@ -117,43 +101,42 @@ const scanStage3Rows = async (req, res) => {
       }));
 
       if (candles.length > 0) {
-        candlesByUnderlying[u] = candles;
-        console.log(`✅ Loaded ${candles.length} candles for ${u}`);
+        candlesBySymbol[sym] = candles;
+        console.log(`✅ Loaded ${candles.length} candles for ${sym}`);
       }
     }
 
     const resultRows = [];
     const errors = [];
 
-    // ✅ CRITICAL FIX: Process each row individually instead of grouping
+    // ✅ Process each option row individually with its own candles
     for (const row of rows) {
-      const u = (
-        row.sourceSymbol ||
-        row.underlying ||
-        row.symbol?.slice(0, row.symbol.length - 15) ||
-        row.ticker ||
-        row.baseSymbol ||
-        'UNKNOWN'
-      ).toUpperCase();
+      const optionSymbol = (row.symbol || '').toUpperCase();
       
-      const candles = candlesByUnderlying[u];
+      if (!optionSymbol) {
+        console.warn(`⚠️ Row missing symbol:`, row);
+        errors.push({ row, error: 'Missing symbol' });
+        continue;
+      }
+
+      const candles = candlesBySymbol[optionSymbol];
       
       if (!candles || candles.length === 0) {
-        console.warn(`⚠️  No candles available for ${row.symbol} (underlying: ${u})`);
-        errors.push({ symbol: row.symbol, error: 'No intraday data available' });
+        console.warn(`⚠️ No candles available for ${optionSymbol}`);
+        errors.push({ symbol: optionSymbol, error: 'No intraday data available' });
         
         // Still add the row but with null study values
         const emptyLabels = {};
         for (let i = 1; i <= 25; i++) {
           emptyLabels[`study${i}`] = null;
         }
-        resultRows.push({ ...row, ...emptyLabels, underlying: u });
+        resultRows.push({ ...row, ...emptyLabels });
         continue;
       }
 
-      console.log(`\n🎯 Processing ${row.symbol} (${u}): ${candles.length} candles`);
+      console.log(`\n🎯 Processing ${optionSymbol}: ${candles.length} candles`);
 
-      // 📹 Evaluate all 5 studies for THIS specific row
+      // 🔹 Evaluate all 5 studies for THIS specific option
       const studyLabels = {};
       
       for (let i = 1; i <= 5; i++) {
@@ -177,10 +160,10 @@ const scanStage3Rows = async (req, res) => {
           const { plots, defs } = extractPlotExpressions(formula, inputs);
           const plotFormulas = plots.map(p => p.exprRaw);
 
-          // ✅ CRITICAL: Evaluate formulas for THIS row's candles
+          // ✅ CRITICAL: Evaluate formulas for THIS OPTION'S candles
           const { labels } = evaluateFormulasOnCandles(candles, plotFormulas, defs);
 
-          console.log(`  📊 Study ${i} for ${row.symbol}:`, labels.slice(0, 5).map(v => 
+          console.log(`  📊 Study ${i} for ${optionSymbol}:`, labels.slice(0, 5).map(v => 
             v === null ? 'null' : (Math.abs(v) < 0.01 ? v.toExponential(3) : v.toFixed(4))
           ));
 
@@ -212,7 +195,7 @@ const scanStage3Rows = async (req, res) => {
           studyLabels[studyKey] = labelObjects;
 
         } catch (err) {
-          console.error(`❌ Error evaluating study ${i} for ${row.symbol}:`, err.message);
+          console.error(`❌ Error evaluating study ${i} for ${optionSymbol}:`, err.message);
           studyLabels[studyKey] = Array(5).fill(null).map(() => ({ 
             value: null, 
             status: 'error' 
@@ -220,7 +203,7 @@ const scanStage3Rows = async (req, res) => {
         }
       }
 
-      // 📹 Flatten study labels into study1-study25 fields for THIS row
+      // 🔹 Flatten study labels into study1-study25 fields for THIS row
       const flattenedLabels = {};
       let labelIndex = 1;
       
@@ -238,16 +221,15 @@ const scanStage3Rows = async (req, res) => {
       
       resultRows.push({ 
         ...row, 
-        ...flattenedLabels, // study1, study2, ..., study25 - unique per row!
-        studyLabels, // Also keep nested structure for debugging
-        underlying: u 
+        ...flattenedLabels, // study1, study2, ..., study25 - unique per option!
+        studyLabels // Also keep nested structure for debugging
       });
     }
 
     console.log(`✅ Stage 4 scan complete: ${resultRows.length} rows processed`);
 
     if (errors.length > 0) {
-      console.warn('⚠️  Some symbols had errors:', errors);
+      console.warn('⚠️ Some symbols had errors:', errors);
     }
 
     return res.json({ 
