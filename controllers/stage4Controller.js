@@ -49,12 +49,14 @@ const getLabelsForUnderlying = async (req, res) => {
  * MAIN: Stage 4 Scan
  * Accepts Stage 3 rows (each row representing an option)
  * Runs all 5 study formulas against each underlying's intraday data
+ * 
+ * ✅ FIXED: Now evaluates formulas separately for each option's data
  */
 const scanStage3Rows = async (req, res) => {
   try {
     const { rows = [], interval = 15, studies = {} } = req.body || {};
     
-    console.log('📥 Stage 4 Scan Request:', {
+    console.log('🔥 Stage 4 Scan Request:', {
       rowCount: rows.length,
       interval,
       studyKeys: Object.keys(studies)
@@ -64,7 +66,7 @@ const scanStage3Rows = async (req, res) => {
       return res.status(400).json({ success: false, error: 'rows required' });
     }
 
-    // 🔹 Group rows by underlying symbol
+    // 📹 Group rows by underlying symbol
     const byUnderlying = {};
     rows.forEach(r => {
       // Extract underlying symbol from option symbol
@@ -86,18 +88,17 @@ const scanStage3Rows = async (req, res) => {
 
     console.log('📊 Grouped by underlyings:', underlyings);
 
-    // 🔹 Fetch intraday data for all underlyings
+    // 📹 Fetch intraday data for all underlyings
     const multi = await getMultipleIntradayData(underlyings, interval);
-
-    const resultRows = [];
-    const errors = [];
-
+    
+    // Store candles by underlying for reuse
+    const candlesByUnderlying = {};
+    
     for (const item of multi) {
       const u = item.symbol.toUpperCase();
       
       if (item.error) {
         console.error(`❌ Failed to fetch intraday data for ${u}:`, item.error);
-        errors.push({ symbol: u, error: item.error });
         continue;
       }
 
@@ -115,15 +116,44 @@ const scanStage3Rows = async (req, res) => {
         theo: c.theo
       }));
 
-      if (candles.length === 0) {
-        console.warn(`⚠️  No candles available for ${u}`);
-        errors.push({ symbol: u, error: 'No intraday data available' });
+      if (candles.length > 0) {
+        candlesByUnderlying[u] = candles;
+        console.log(`✅ Loaded ${candles.length} candles for ${u}`);
+      }
+    }
+
+    const resultRows = [];
+    const errors = [];
+
+    // ✅ CRITICAL FIX: Process each row individually instead of grouping
+    for (const row of rows) {
+      const u = (
+        row.sourceSymbol ||
+        row.underlying ||
+        row.symbol?.slice(0, row.symbol.length - 15) ||
+        row.ticker ||
+        row.baseSymbol ||
+        'UNKNOWN'
+      ).toUpperCase();
+      
+      const candles = candlesByUnderlying[u];
+      
+      if (!candles || candles.length === 0) {
+        console.warn(`⚠️  No candles available for ${row.symbol} (underlying: ${u})`);
+        errors.push({ symbol: row.symbol, error: 'No intraday data available' });
+        
+        // Still add the row but with null study values
+        const emptyLabels = {};
+        for (let i = 1; i <= 25; i++) {
+          emptyLabels[`study${i}`] = null;
+        }
+        resultRows.push({ ...row, ...emptyLabels, underlying: u });
         continue;
       }
 
-      console.log(`✅ Processing ${u}: ${candles.length} candles`);
+      console.log(`\n🎯 Processing ${row.symbol} (${u}): ${candles.length} candles`);
 
-      // 🔹 Evaluate all 5 studies (each study has 1 formula that may output multiple plots)
+      // 📹 Evaluate all 5 studies for THIS specific row
       const studyLabels = {};
       
       for (let i = 1; i <= 5; i++) {
@@ -147,16 +177,24 @@ const scanStage3Rows = async (req, res) => {
           const { plots, defs } = extractPlotExpressions(formula, inputs);
           const plotFormulas = plots.map(p => p.exprRaw);
 
-          console.log(`🔬 Study ${i} for ${u}:`, {
-            plotCount: plots.length,
-            defCount: Object.keys(defs).length,
-            inputCount: Object.keys(inputs).length
-          });
+          // ✅ CRITICAL: Evaluate formulas for THIS row's candles with option-specific data
+          const optionData = {
+            strikePrice: row.strikePrice || row.strike || 0,
+            mark: row.mark || 0,
+            bid: row.bid || 0,
+            ask: row.ask || 0,
+            delta: row.delta || 0,
+            gamma: row.gamma || 0,
+            theta: row.theta || 0,
+            vega: row.vega || 0,
+            impliedVolatility: row.impliedVolatility || row.volatility || 0
+          };
+          
+          const { labels } = evaluateFormulasOnCandles(candles, plotFormulas, defs, optionData);
 
-          // Evaluate formulas on candles
-          const { labels } = evaluateFormulasOnCandles(candles, plotFormulas, defs);
-
-          console.log(`📊 Study ${i} results for ${u}:`, labels.slice(0, 5));
+          console.log(`  📊 Study ${i} for ${row.symbol}:`, labels.slice(0, 5).map(v => 
+            v === null ? 'null' : (Math.abs(v) < 0.01 ? v.toExponential(3) : v.toFixed(4))
+          ));
 
           // Create label objects with threshold evaluation
           const labelObjects = labels.slice(0, 5).map((v, j) => {
@@ -186,7 +224,7 @@ const scanStage3Rows = async (req, res) => {
           studyLabels[studyKey] = labelObjects;
 
         } catch (err) {
-          console.error(`❌ Error evaluating study ${i} for ${u}:`, err.message);
+          console.error(`❌ Error evaluating study ${i} for ${row.symbol}:`, err.message);
           studyLabels[studyKey] = Array(5).fill(null).map(() => ({ 
             value: null, 
             status: 'error' 
@@ -194,33 +232,28 @@ const scanStage3Rows = async (req, res) => {
         }
       }
 
-      // 🔹 Attach study labels to each related row
-      const rowsForU = byUnderlying[u] || [];
-
-      for (const r of rowsForU) {
-        // Flatten study labels into study1-study25 fields
-        const flattenedLabels = {};
-        let labelIndex = 1;
+      // 📹 Flatten study labels into study1-study25 fields for THIS row
+      const flattenedLabels = {};
+      let labelIndex = 1;
+      
+      for (let s = 1; s <= 5; s++) {
+        const studyKey = `study${s}`;
+        const studyData = studyLabels[studyKey] || [];
         
-        for (let s = 1; s <= 5; s++) {
-          const studyKey = `study${s}`;
-          const studyData = studyLabels[studyKey] || [];
-          
-          for (let l = 0; l < 5; l++) {
-            const labelData = studyData[l] || { value: null, status: 'unknown' };
-            const fieldKey = `study${labelIndex}`;
-            flattenedLabels[fieldKey] = labelData.value; // Just the numeric value
-            labelIndex++;
-          }
+        for (let l = 0; l < 5; l++) {
+          const labelData = studyData[l] || { value: null, status: 'unknown' };
+          const fieldKey = `study${labelIndex}`;
+          flattenedLabels[fieldKey] = (labelData.value === null ? null : Number(labelData.value));
+          labelIndex++;
         }
-        
-        resultRows.push({ 
-          ...r, 
-          ...flattenedLabels, // study1, study2, ..., study25 
-          studyLabels, // Also keep nested structure for debugging
-          underlying: u 
-        });
       }
+      
+      resultRows.push({ 
+        ...row, 
+        ...flattenedLabels, // study1, study2, ..., study25 - unique per row!
+        studyLabels, // Also keep nested structure for debugging
+        underlying: u 
+      });
     }
 
     console.log(`✅ Stage 4 scan complete: ${resultRows.length} rows processed`);

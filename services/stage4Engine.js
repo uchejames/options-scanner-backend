@@ -234,7 +234,7 @@ function buildSeries(candles) {
 /**
  * Create basic evaluation context (for non-aggregation expressions)
  */
-function createBasicContext(candles, candleIndex, defSeries = {}) {
+function createBasicContext(candles, candleIndex, defSeries = {}, optionData = {}) {
   const { series, getAt } = buildSeries(candles);
   const i = candleIndex;
 
@@ -252,6 +252,17 @@ function createBasicContext(candles, candleIndex, defSeries = {}) {
     mark: getAt(series.mark, i),
     ask: getAt(series.ask, i),
     bid: getAt(series.bid, i),
+
+    // Option-specific constants (same across all candles for this option)
+    strikePrice: optionData.strikePrice || 0,
+    optionMark: optionData.mark || 0,
+    optionBid: optionData.bid || 0,
+    optionAsk: optionData.ask || 0,
+    optionDelta: optionData.delta || 0,
+    optionGamma: optionData.gamma || 0,
+    optionTheta: optionData.theta || 0,
+    optionVega: optionData.vega || 0,
+    impliedVolatility: optionData.impliedVolatility || 0,
 
     // Offset accessor
     _off_: function(seriesName, offset = 0) {
@@ -603,6 +614,8 @@ function evaluateRows(rows = [], studyScriptsFlat = [], studyScriptsRaw = {}) {
       return { symbol: row.symbol, labels: formulas.map(() => null) };
     }
     
+    console.log(`\n🎯 Processing ticker: ${row.symbol} (${candles.length} candles)`);
+    
     // Collect all defs from all scripts
     const allDefs = {};
     if (studyScriptsRaw && typeof studyScriptsRaw === 'object') {
@@ -622,6 +635,10 @@ function evaluateRows(rows = [], studyScriptsFlat = [], studyScriptsRaw = {}) {
     labels.forEach((v, idx) => {
       result[`study${idx + 1}`] = (v === null ? null : Number(v));
     });
+    
+    console.log(`✅ ${row.symbol} completed:`, labels.slice(0, 3).map(v => 
+      v === null ? 'null' : (Math.abs(v) < 0.01 ? v.toExponential(3) : v.toFixed(4))
+    ));
     
     return result;
   });
