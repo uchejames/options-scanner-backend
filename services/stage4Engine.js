@@ -294,14 +294,14 @@ function createBasicContext(candles, candleIndex, defSeries = {}, optionData = {
 /**
  * Evaluate a simple expression (no aggregations) across all candles
  */
-function evaluateSimpleExpression(expr, candles, defSeries = {}) {
+function evaluateSimpleExpression(expr, candles, defSeries = {}, optionData = {}) {
   const values = [];
   
   try {
     const parsed = math.parse(expr);
     
     for (let i = 0; i < candles.length; i++) {
-      const ctx = createBasicContext(candles, i, defSeries);
+      const ctx = createBasicContext(candles, i, defSeries, optionData);
       const result = parsed.evaluate(ctx);
       const num = Number(result);
       values.push(isFinite(num) ? num : 0);
@@ -355,7 +355,7 @@ function applyAggregation(funcName, inputSeries, length, candles) {
  * Recursively evaluate formula with nested aggregations
  * This handles cases like: SimpleMovingAvg(SimpleMovingAvg(close, 5), 10)
  */
-function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, cache = new Map()) {
+function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, cache = new Map(), optionData = {}) {
   // Normalize the expression first
   const normalized = normalizeFormula(expr, allDefs);
   
@@ -373,6 +373,16 @@ function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, c
     return result;
   }
   
+  // Check if this is an option-specific field (constant across candles)
+  const optionFields = ['strikePrice', 'optionMark', 'optionBid', 'optionAsk', 'optionDelta', 'optionGamma', 'optionTheta', 'optionVega', 'impliedVolatility'];
+  if (optionFields.includes(normalized)) {
+    const value = optionData[normalized.replace('option', '').toLowerCase()] || 
+                  optionData[normalized] || 0;
+    const result = candles.map(() => value);
+    cache.set(normalized, result);
+    return result;
+  }
+  
   // Check if this is a def variable
   if (defSeries[normalized]) {
     return defSeries[normalized];
@@ -383,7 +393,7 @@ function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, c
   
   if (aggCalls.length === 0) {
     // No aggregations - evaluate as simple expression
-    const result = evaluateSimpleExpression(normalized, candles, defSeries);
+    const result = evaluateSimpleExpression(normalized, candles, defSeries, optionData);
     cache.set(normalized, result);
     return result;
   }
@@ -428,7 +438,7 @@ function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, c
     }
     
     // Recursively evaluate the input expression (handles nested aggregations)
-    const inputSeries = evaluateFormulaRecursive(inputExpr, candles, allDefs, defSeries, cache);
+    const inputSeries = evaluateFormulaRecursive(inputExpr, candles, allDefs, defSeries, cache, optionData);
     
     // Apply the aggregation
     const resultSeries = applyAggregation(funcName, inputSeries, length, candles);
@@ -448,7 +458,7 @@ function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, c
     const parsed = math.parse(workingExpr);
     
     for (let i = 0; i < candles.length; i++) {
-      const ctx = createBasicContext(candles, i, defSeries);
+      const ctx = createBasicContext(candles, i, defSeries, optionData);
       
       // Add temp series values at this candle
       tempSeries.forEach((series, varName) => {
@@ -471,7 +481,7 @@ function evaluateFormulaRecursive(expr, candles, allDefs = {}, defSeries = {}, c
 /**
  * Evaluate all defs to create time series for each
  */
-function buildDefSeries(candles, defs) {
+function buildDefSeries(candles, defs, optionData = {}) {
   if (!defs || Object.keys(defs).length === 0) {
     return {};
   }
@@ -506,7 +516,7 @@ function buildDefSeries(candles, defs) {
         // CRITICAL: Create a fresh cache for each def evaluation
         const defCache = new Map();
         // Evaluate this def across all candles using recursive evaluator
-        const values = evaluateFormulaRecursive(defExpr, candles, defs, defSeries, defCache);
+        const values = evaluateFormulaRecursive(defExpr, candles, defs, defSeries, defCache, optionData);
         defSeries[defName] = values;
         evaluated.add(defName);
         progress = true;
@@ -533,7 +543,7 @@ function buildDefSeries(candles, defs) {
 /**
  * Evaluate formulas on candle data
  */
-function evaluateFormulasOnCandles(candles, formulas = [], defs = {}) {
+function evaluateFormulasOnCandles(candles, formulas = [], defs = {}, optionData = {}) {
   if (!candles || candles.length === 0) {
     console.warn('⚠️  No candles to evaluate');
     return { labels: formulas.map(() => null), compiledCount: formulas.length };
@@ -542,7 +552,7 @@ function evaluateFormulasOnCandles(candles, formulas = [], defs = {}) {
   console.log(`🔬 Evaluating ${formulas.length} formulas on ${candles.length} candles`);
   
   // Build def time series first
-  const defSeries = buildDefSeries(candles, defs);
+  const defSeries = buildDefSeries(candles, defs, optionData);
   
   // Evaluate each plot formula with a FRESH cache for this ticker
   const labels = formulas.map((formulaStr, idx) => {
@@ -550,7 +560,7 @@ function evaluateFormulasOnCandles(candles, formulas = [], defs = {}) {
       console.log(`\n📊 Evaluating formula ${idx + 1}: ${formulaStr}`);
       // CRITICAL: Create a new cache for each formula evaluation to ensure ticker-specific results
       const freshCache = new Map();
-      const resultSeries = evaluateFormulaRecursive(formulaStr, candles, defs, defSeries, freshCache);
+      const resultSeries = evaluateFormulaRecursive(formulaStr, candles, defs, defSeries, freshCache, optionData);
       
       // Return the last value
       const lastValue = resultSeries[resultSeries.length - 1];
